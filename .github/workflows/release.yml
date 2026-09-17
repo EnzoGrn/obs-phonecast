@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      scrcpy_version:
+        description: "scrcpy version to bundle into the Windows archive"
+        default: '4.0'
+
+env:
+  # scrcpy version bundled into the Windows archive.
+  # Bumped by hand on purpose: automatically bundling "the latest version"
+  # would make a reproducible release depend on a third-party repo.
+  SCRCPY_VERSION: ${{ github.event.inputs.scrcpy_version || '4.0' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # Bun can cross-compile for other platforms from Linux: a single
+    # runner produces all four binaries. No matrix, no macOS/Windows
+    # runners to pay for.
+    strategy:
+      matrix:
+        include:
+          - target: bun-windows-x64
+            name: windows-x64
+            ext: .exe
+          - target: bun-darwin-arm64
+            name: macos-arm64
+            ext: ''
+          - target: bun-darwin-x64
+            name: macos-x64
+            ext: ''
+          - target: bun-linux-x64
+            name: linux-x64
+            ext: ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Compile
+        run: |
+          mkdir -p dist
+          bun build --compile \
+            --target=${{ matrix.target }} \
+            ./src/index.js \
+            --outfile dist/obs-phonecast${{ matrix.ext }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-phonecast-${{ matrix.name }}
+          path: dist/obs-phonecast${{ matrix.ext }}
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Fetch scrcpy for the Windows archive
+        # Apache 2.0 allows redistributing the binaries. So we bundle both
+        # scrcpy AND adb into the Windows archive, the only platform where
+        # scrcpy ships a standalone release. On macOS and Linux the normal
+        # path remains the package manager.
+        run: |
+          curl -fsSL -o scrcpy.zip \
+            "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-win64-v${SCRCPY_VERSION}.zip"
+          mkdir -p vendor/scrcpy/win32
+          unzip -q scrcpy.zip -d tmp
+          mv tmp/*/* vendor/scrcpy/win32/
+          # Attribution is a license requirement, not a courtesy.
+          curl -fsSL -o vendor/scrcpy/win32/LICENSE.scrcpy \
+            "https://raw.githubusercontent.com/Genymobile/scrcpy/v${SCRCPY_VERSION}/LICENSE"
+
+      - name: Assemble the archives
+        run: |
+          mkdir -p release
+
+          # Windows: binary + bundled scrcpy, the user installs nothing.
+          mkdir -p bundle/obs-phonecast
+          cp artifacts/obs-phonecast-windows-x64/obs-phonecast.exe bundle/obs-phonecast/
+          cp -r vendor bundle/obs-phonecast/
+          cp README.md ROADMAP.md config.example.json bundle/obs-phonecast/
+          (cd bundle && zip -qr ../release/obs-phonecast-windows-x64.zip obs-phonecast)
+
+          # The others: binary alone, scrcpy comes from the package manager.
+          for name in macos-arm64 macos-x64 linux-x64; do
+            mkdir -p "bundle/$name"
+            cp "artifacts/obs-phonecast-$name/obs-phonecast" "bundle/$name/"
+            chmod +x "bundle/$name/obs-phonecast"
+            cp README.md config.example.json "bundle/$name/"
+            (cd "bundle/$name" && tar czf "../../release/obs-phonecast-$name.tar.gz" .)
+          done
+
+          # Checksums let people verify a download, and help users facing
+          # SmartScreen and Gatekeeper warnings.
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          ls -la release
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            **Windows** -- download `obs-phonecast-windows-x64.zip`, unzip,
+            run `obs-phonecast.exe`. scrcpy and adb are included, nothing else to install.
+
+            SmartScreen will show a warning: the binary isn't signed.
+            Click "More info" then "Run anyway". SHA256 checksums are in
+            `SHA256SUMS.txt` if you want to verify.
+
+            **macOS** -- Gatekeeper BLOCKS the binary outright, it isn't notarized.
+            After the first refusal, allow it under System Settings >
+            Privacy & Security, or run:
+            `xattr -d com.apple.quarantine ./obs-phonecast`
+            Install scrcpy with `brew install scrcpy`.
+
+            **Linux** -- unzip, `chmod +x obs-phonecast`.
+            Install scrcpy via your package manager.
+
+            ---
+
+            scrcpy is developed by Genymobile and Romain Vimont, under the
+            Apache 2.0 license. obs-phonecast is only an orchestration layer on top.

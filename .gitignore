@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# Bundled scrcpy binaries: fetched by the release workflow, never
+# versioned. They weigh ~50 MB and are under a different license
+# (Apache 2.0).
+vendor/
+
+# Local configuration -- CONTAINS THE OBS PASSWORD.
+# config.example.json stays versioned, this doesn't.
+obs-phonecast.json
+config.json
+.env
+.env.*
+!.env.example
+
+# Cache: regenerable, and its real location is in the OS's cache
+# directory anyway, not here. This line covers any local cache folder.
+cache/
+.cache/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+
+# Tests and coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Misc
+*.zip
+*.tar.gz
+tmp/

@@ -1,0 +1,30 @@
+{
+  "app": "com.google.android.youtube",
+
+  "display": { "width": 1080, "height": 2000, "dpi": 420 },
+
+  "video": {
+    "codec": "h264",
+    "bitrate": "16M",
+    "maxFps": 60,
+    "bufferMs": 0,
+    "encoder": null
+  },
+
+  "audio": { "enabled": false },
+  "control": { "enabled": false },
+
+  "obs": {
+    "host": "localhost",
+    "port": 4455,
+    "password": "",
+    "sceneName": "Phone",
+    "inputName": "Phone Screen",
+    "switchToScene": false
+  },
+
+  "layout": { "anchor": "right", "widthRatio": 0.28, "marginPx": 24 },
+
+  "navBarHeight": null,
+  "statusBarHeight": 0
+}

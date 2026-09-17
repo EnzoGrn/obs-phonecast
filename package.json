@@ -1,0 +1,31 @@
+{
+  "name": "obs-phonecast",
+  "version": "0.1.0",
+  "description": "Stream an Android phone's screen into OBS, without notifications or the navigation bar.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/index.js",
+    "build": "bun build --compile ./src/index.js --outfile dist/obs-phonecast",
+    "build:win": "bun build --compile --target=bun-windows-x64 ./src/index.js --outfile dist/obs-phonecast.exe"
+  },
+  "dependencies": {
+    "obs-websocket-js": "^5.0.6",
+    "execa": "^9.5.2",
+    "ws": "^8.21.3"
+  },
+  "bin": {
+    "obs-phonecast": "src/index.js"
+  },
+  "files": [
+    "src",
+    "web",
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ]
+}

@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>obs-phonecast</title>
+<style>
+  :root {
+    color-scheme: dark;
+    /* A control-panel palette, not a SaaS one: warm stage-black rather
+       than blue-grey, and two signal colors that each mean one specific
+       thing -- teal for idle/connected (an oscilloscope trace), tally red
+       reserved for "live" (a broadcast tally light). Nothing else in the
+       page uses either color. */
+    --stage: #121214;
+    --panel: #1a1a1d;
+    --line: #2c2c30;
+    --ink: #e9e7e2;
+    --muted: #8d8a86;
+    --signal: #4fbdaa;
+    --tally: #e0483f;
+    --tally-dim: #5a2b28;
+    --warn: #d9a441;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-monospace, "JetBrains Mono", "SF Mono", Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--stage);
+    color: var(--ink);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+
+  /* -- Header: a front-panel nameplate, not a dashboard title bar -- */
+  header {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .tally-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+    transition: background-color 0.2s ease;
+  }
+  .tally-dot.connected { background: var(--signal); }
+  .tally-dot.running {
+    background: var(--tally);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(224, 72, 63, 0.55); }
+    50% { box-shadow: 0 0 0 4px rgba(224, 72, 63, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tally-dot.running { animation: none; }
+  }
+  header h1 {
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin: 0;
+    flex: 1;
+  }
+  #statusText { color: var(--muted); font-weight: 400; }
+
+  main {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+  }
+
+  /* -- Panel labels read like silkscreen printing on hardware: lowercase,
+        small, to the left of the control they name -- not a floating
+        all-caps eyebrow above it. -- */
+  .control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .control-label {
+    color: var(--muted);
+    min-width: 44px;
+    flex-shrink: 0;
+  }
+
+  select, input[type="text"], input[type="password"], input[type="number"] {
+    font: inherit;
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    padding: 6px 8px;
+    flex: 1;
+    min-width: 0;
+  }
+  select:focus-visible, input:focus-visible, button:focus-visible {
+    outline: 2px solid var(--signal);
+    outline-offset: 1px;
+  }
+
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: 2px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    padding: 6px 10px;
+  }
+  button:hover { border-color: var(--signal); }
+  button:disabled { opacity: 0.4; cursor: default; border-color: var(--line); }
+  .icon-btn { flex-shrink: 0; }
+  .icon-btn.spinning {
+    animation: spin 0.8s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .icon-btn.spinning { animation: none; }
+  }
+
+  /* -- The on-air button: ONE control that changes role with state,
+        the way a real broadcast button does, rather than two buttons
+        side by side with one greyed out. -- */
+  #onAirBtn {
+    width: 100%;
+    padding: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border-radius: 2px;
+    border: 1px solid var(--signal);
+    background: transparent;
+    color: var(--signal);
+  }
+  #onAirBtn:hover { background: rgba(79, 189, 170, 0.1); }
+  #onAirBtn.live {
+    border-color: var(--tally);
+    background: var(--tally);
+    color: #fff;
+    animation: liveglow 1.6s ease-in-out infinite;
+  }
+  #onAirBtn.live:hover { background: #c73f37; }
+  @keyframes liveglow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(224, 72, 63, 0.4); }
+    50% { box-shadow: 0 0 0 5px rgba(224, 72, 63, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #onAirBtn.live { animation: none; }
+  }
+
+  /* -- Launcher toggle: a small rocker switch, not an iOS pill -- it
+        matches the hardware-panel language instead of a phone-OS one. -- */
+  .switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    color: var(--muted);
+  }
+  .switch input {
+    appearance: none;
+    width: 30px;
+    height: 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    position: relative;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .switch input::after {
+    content: "";
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 12px;
+    height: 12px;
+    background: var(--muted);
+    transition: transform 0.12s ease, background-color 0.12s ease;
+  }
+  .switch input:checked { border-color: var(--signal); }
+  .switch input:checked::after {
+    background: var(--signal);
+    transform: translateX(14px);
+  }
+  .switch input:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+  details {
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    padding: 8px 10px;
+  }
+  summary {
+    cursor: pointer;
+    color: var(--muted);
+    user-select: none;
+  }
+  summary::marker { color: var(--muted); }
+  details[open] summary { color: var(--ink); margin-bottom: 8px; }
+  .field { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
+  .field label { color: var(--muted); min-width: 90px; flex-shrink: 0; }
+  .field input { flex: 1; min-width: 120px; }
+  #configStatus { color: var(--signal); min-height: 14px; font-size: 11.5px; }
+
+  /* -- The log reads like a character-generator feed: timestamp column,
+        thin state-colored rail on the left, monospace throughout -- this
+        is real information (what's happening, when), not a chat window. -- */
+  #logs {
+    flex: 1;
+    min-height: 120px;
+    overflow-y: auto;
+    background: #000;
+    border: 1px solid var(--line);
+    border-left: 2px solid var(--line);
+    border-radius: 2px;
+    padding: 8px 10px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    transition: border-left-color 0.2s ease;
+  }
+  #logs.live { border-left-color: var(--tally); }
+  .log-line { display: flex; gap: 8px; white-space: pre-wrap; word-break: break-word; }
+  .log-time { color: var(--muted); flex-shrink: 0; }
+  .log-line.warn .log-msg { color: var(--warn); }
+  .log-line.error .log-msg { color: var(--tally); }
+  .log-line.debug .log-msg { color: var(--muted); }
+
+  footer {
+    padding: 8px 12px;
+    color: var(--muted);
+    font-size: 11px;
+    border-top: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span id="statusDot" class="tally-dot"></span>
+  <h1>obs-phonecast <span id="statusText">connecting</span></h1>
+</header>
+
+<main>
+  <div class="control">
+    <span class="control-label">app</span>
+    <select id="appSelect">
+      <option value="">loading...</option>
+    </select>
+    <button id="refreshBtn" class="icon-btn" title="Refresh app list">&#8635;</button>
+  </div>
+
+  <label class="switch">
+    <input type="checkbox" id="launcherCheck" />
+    launcher mode
+  </label>
+
+  <button id="onAirBtn">Start</button>
+
+  <details id="settingsPanel">
+    <summary>settings</summary>
+    <div class="field">
+      <label for="cfgPassword">OBS password</label>
+      <input id="cfgPassword" type="password" placeholder="Tools > WebSocket Server Settings" />
+    </div>
+    <div class="field">
+      <label for="cfgPort">OBS port</label>
+      <input id="cfgPort" type="number" placeholder="4455" />
+    </div>
+    <div class="field">
+      <label for="cfgApp">default app</label>
+      <input id="cfgApp" type="text" placeholder="e.g. youtube" />
+    </div>
+    <div class="field">
+      <label for="cfgDpi">dpi</label>
+      <input id="cfgDpi" type="number" placeholder="420" />
+    </div>
+    <div class="field">
+      <label for="cfgBitrate">bitrate</label>
+      <input id="cfgBitrate" type="text" placeholder="16M" />
+    </div>
+    <div class="row" style="display:flex; gap:6px;">
+      <button id="saveConfigBtn" style="flex:1;">Save settings</button>
+      <button id="reloadConfigBtn" title="Discard edits and reload from disk">&#8635;</button>
+    </div>
+    <div id="configStatus"></div>
+  </details>
+
+  <div id="logs"></div>
+</main>
+
+<footer>Local control panel for your obs-phonecast session.</footer>
+
+<script>
+(() => {
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const appSelect = document.getElementById('appSelect');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const launcherCheck = document.getElementById('launcherCheck');
+  const onAirBtn = document.getElementById('onAirBtn');
+  const logs = document.getElementById('logs');
+
+  let ws = null;
+  let sessionState = 'idle';
+  // getConfig is only requested ONCE per page load, not on every
+  // reconnect. Real bug this avoided: OBS's embedded browser can suspend
+  // and silently reconnect a dock's WebSocket when it loses focus: if that
+  // happened while someone was mid-edit in the settings panel (say,
+  // typing "16M" into bitrate), a getConfig on every reconnect would
+  // overwrite the field with whatever's on disk -- empty, if nothing had
+  // been saved yet -- and they'd keep typing into a field that had just
+  // been silently reset underneath them.
+  let configLoaded = false;
+  // Same reasoning, same bug class, for the app picker: requesting the app
+  // list on every reconnect rebuilds the <select> from scratch every time
+  // (see onApps below), which silently discarded whatever app someone had
+  // already picked -- reverting to the alphabetically-first one -- on a
+  // dock reconnect they likely never noticed happened.
+  let appsLoaded = false;
+
+  // Reconnect on drop: an OBS dock stays open across scene changes and the
+  // occasional obs-phonecast server restart, it shouldn't need a manual reload.
+  function connect() {
+    ws = new WebSocket(`ws://${location.host}`);
+
+    ws.addEventListener('open', () => {
+      setStatus('connected', 'connected');
+      if (!appsLoaded) send({ type: 'listApps' });
+      if (!configLoaded) send({ type: 'getConfig' });
+    });
+
+    ws.addEventListener('close', () => {
+      setStatus('', 'reconnecting...');
+      setTimeout(connect, 1500);
+    });
+
+    ws.addEventListener('error', () => ws.close());
+
+    ws.addEventListener('message', (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === 'status') onStatus(message);
+      else if (message.type === 'apps') onApps(message.apps);
+      else if (message.type === 'log') onLog(message.record);
+      else if (message.type === 'error') onError(message);
+      else if (message.type === 'config') onConfig(message.config);
+      else if (message.type === 'configSaved') onConfigSaved();
+    });
+  }
+
+  function send(message) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+  }
+
+  function setStatus(kind, text) {
+    statusDot.className = 'tally-dot' + (kind ? ' ' + kind : '');
+    statusText.textContent = text;
+  }
+
+  function onStatus(message) {
+    sessionState = message.state;
+    const running = sessionState === 'running';
+
+    appSelect.disabled = running;
+    launcherCheck.disabled = running;
+    logs.classList.toggle('live', running);
+
+    onAirBtn.classList.toggle('live', running);
+    onAirBtn.textContent = running ? `Stop (${message.mode})` : 'Start';
+
+    if (running) setStatus('running', 'on air');
+    else setStatus('connected', message.reason ? `stopped (${message.reason})` : 'idle');
+  }
+
+  // Wrapped defensively: some embedded/CEF contexts restrict storage, and
+  // this must never be the reason the dock breaks.
+  const STORAGE_KEY = 'obs-phonecast:lastApp';
+  function rememberApp(pkg) {
+    try {
+      if (pkg) localStorage.setItem(STORAGE_KEY, pkg);
+    } catch { /* storage unavailable: the dock still works, just without memory */ }
+  }
+  function recallApp() {
+    try {
+      return localStorage.getItem(STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  }
+
+  function onApps(apps) {
+    appsLoaded = true;
+    refreshBtn.classList.remove('spinning');
+    refreshBtn.disabled = false;
+    // Rebuilding the list (an explicit refresh click, or the very first
+    // load) shouldn't discard whatever was already selected, if it's still
+    // in the new list -- only the alphabetical position is being
+    // recomputed here, not the person's actual choice.
+    //
+    // previousValue covers a reconnect that keeps the page's JS state
+    // intact. It does NOT cover OBS fully reloading the dock's page --
+    // that wipes every in-memory variable, including this one -- so
+    // recallApp() (localStorage, which survives a page reload) is the
+    // real fix for "my app selection resets," not just a fallback for it.
+    const previousValue = appSelect.value || recallApp();
+
+    appSelect.innerHTML = '';
+    // Unlike --list-apps, the dock has no --all-apps escape hatch: every
+    // app is shown here, "system" or not. Real trap this avoided:
+    // manufacturers frequently preinstall ordinary, wanted apps (YouTube,
+    // Chrome, Camera...) as "system" apps -- indistinguishable in kind
+    // from actually-boring OS components -- so hiding "system" apps by
+    // default made someone's own target app vanish from the list with no
+    // way to reveal it short of typing the raw package name by hand.
+    const sortedApps = apps.slice().sort((a, b) => a.name.localeCompare(b.name));
+    if (sortedApps.length === 0) {
+      appSelect.innerHTML = '<option value="">no applications found</option>';
+      return;
+    }
+    for (const app of sortedApps) {
+      const opt = document.createElement('option');
+      opt.value = app.package;
+      opt.textContent = app.name;
+      appSelect.appendChild(opt);
+    }
+
+    if (previousValue && sortedApps.some((a) => a.package === previousValue)) {
+      appSelect.value = previousValue;
+    }
+  }
+
+  function formatTime(ms) {
+    const d = new Date(ms ?? Date.now());
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function onLog(record) {
+    const line = document.createElement('div');
+    line.className = 'log-line ' + (record.level || 'info');
+
+    const time = document.createElement('span');
+    time.className = 'log-time';
+    time.textContent = formatTime(record.time);
+
+    const msg = document.createElement('span');
+    msg.className = 'log-msg';
+    msg.textContent = record.message;
+
+    line.append(time, msg);
+    logs.appendChild(line);
+    // Cap the DOM size: a multi-hour stream shouldn't grow this unbounded.
+    while (logs.children.length > 500) logs.removeChild(logs.firstChild);
+    logs.scrollTop = logs.scrollHeight;
+  }
+
+  function onError({ message, bug }) {
+    // A safety net, not just the happy path: if scrcpy fails entirely (no
+    // device attached, say), the response is an 'error', not an 'apps'
+    // message -- without this, the button would stay spinning forever.
+    refreshBtn.classList.remove('spinning');
+    refreshBtn.disabled = false;
+    onLog({ level: 'error', message: bug ? `[bug] ${message}` : message });
+  }
+
+  // Loaded from the file, then mutated only in the fields the form
+  // exposes -- so a save round-trip preserves any advanced key (set by
+  // hand, or by --init) this form doesn't show.
+  let currentConfig = {};
+
+  function onConfig(config) {
+    configLoaded = true;
+    currentConfig = config || {};
+    document.getElementById('cfgPassword').value = currentConfig.obs?.password ?? '';
+    document.getElementById('cfgPort').value = currentConfig.obs?.port ?? '';
+    document.getElementById('cfgApp').value = currentConfig.app ?? '';
+    document.getElementById('cfgDpi').value = currentConfig.display?.dpi ?? '';
+    document.getElementById('cfgBitrate').value = currentConfig.video?.bitrate ?? '';
+  }
+
+  function onConfigSaved() {
+    const status = document.getElementById('configStatus');
+    status.textContent = 'saved';
+    setTimeout(() => { status.textContent = ''; }, 2500);
+  }
+
+  function setNestedOrDelete(obj, key, subkey, value) {
+    if (value === '' || value == null) {
+      if (obj[key]) delete obj[key][subkey];
+      if (obj[key] && Object.keys(obj[key]).length === 0) delete obj[key];
+      return;
+    }
+    obj[key] = obj[key] || {};
+    obj[key][subkey] = value;
+  }
+
+  document.getElementById('saveConfigBtn').addEventListener('click', () => {
+    const updated = JSON.parse(JSON.stringify(currentConfig));
+
+    setNestedOrDelete(updated, 'obs', 'password', document.getElementById('cfgPassword').value);
+    const port = document.getElementById('cfgPort').value;
+    setNestedOrDelete(updated, 'obs', 'port', port ? Number(port) : '');
+
+    const app = document.getElementById('cfgApp').value.trim();
+    if (app) updated.app = app; else delete updated.app;
+
+    const dpi = document.getElementById('cfgDpi').value;
+    setNestedOrDelete(updated, 'display', 'dpi', dpi ? Number(dpi) : '');
+
+    const bitrate = document.getElementById('cfgBitrate').value.trim();
+    setNestedOrDelete(updated, 'video', 'bitrate', bitrate);
+
+    send({ type: 'saveConfig', config: updated });
+    document.getElementById('configStatus').textContent = 'saving...';
+  });
+
+  appSelect.addEventListener('change', () => rememberApp(appSelect.value));
+
+  refreshBtn.addEventListener('click', () => {
+    refreshBtn.classList.add('spinning');
+    refreshBtn.disabled = true;
+    send({ type: 'listApps', refresh: true });
+  });
+  document.getElementById('reloadConfigBtn').addEventListener('click', () => send({ type: 'getConfig' }));
+
+  onAirBtn.addEventListener('click', () => {
+    if (sessionState === 'running') {
+      send({ type: 'stop' });
+    } else {
+      send({ type: 'start', app: appSelect.value || null, launcher: launcherCheck.checked });
+    }
+  });
+
+  connect();
+})();
+</script>
+
+</body>
+</html>

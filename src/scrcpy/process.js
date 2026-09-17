@@ -1,0 +1,249 @@
+/**
+ * Launch, monitoring, and clean shutdown of scrcpy.
+ *
+ * The delicate part of this file is SHUTDOWN, not startup.
+ *
+ * On Unix, SIGTERM is enough: scrcpy intercepts it, destroys the virtual
+ * display on the phone, and exits.
+ *
+ * On Windows there's no real signal. `child.kill()` ends up calling
+ * TerminateProcess, which kills the process without letting it run its own
+ * cleanup. Concrete result: an orphaned virtual display stays on the phone,
+ * and you need to reboot it or relaunch scrcpy to get rid of it. The fix is
+ * `taskkill /T` WITHOUT `/F`, which sends a WM_CLOSE to the window: the SDL
+ * loop receives it and exits cleanly. We only escalate to `/F` as a last
+ * resort, after a timeout.
+ */
+
+import { execa } from 'execa';
+import readline from 'node:readline';
+import { EventEmitter } from 'node:events';
+
+import { buildArgs, formatCommand } from './args.js';
+import { PhonecastError, ErrorCode } from '../errors.js';
+
+/** Number of stderr lines kept for error reports. */
+const LOG_RING_SIZE = 60;
+
+export class ScrcpyLaunchError extends PhonecastError {
+  constructor(message, { stderr = [], command = null, exitCode = null, hint = null } = {}) {
+    super(message, { hint, code: ErrorCode.SCRCPY_LAUNCH_FAILED });
+    this.stderr = stderr;
+    this.command = command;
+    this.exitCode = exitCode;
+  }
+
+  /** The command and the last lines are what you want in a bug report. */
+  toJSON() {
+    return { ...super.toJSON(), command: this.command, stderr: this.stderr.slice(-10) };
+  }
+}
+
+/**
+ * Wraps a scrcpy process.
+ *
+ * Events emitted:
+ *   'log'  (line)                 each stderr line, raw
+ *   'exit' ({ exitCode, signal })  process exit, expected or not
+ */
+export class ScrcpyProcess extends EventEmitter {
+  constructor({ binary, args, env = {} }) {
+    super();
+    this.binary = binary;
+    this.args = args;
+    this.env = env;
+    this.subprocess = null;
+    this.exitInfo = null;
+    this.stopping = false;
+    /** Ring buffer of the last stderr lines. */
+    this.logs = [];
+  }
+
+  get command() {
+    return formatCommand(this.binary, this.args);
+  }
+
+  /** True as long as the process is running. This is what waitForWindow polls. */
+  isAlive() {
+    return Boolean(this.subprocess) && this.exitInfo === null;
+  }
+
+  start() {
+    if (this.subprocess) throw new Error('Process already started');
+
+    this.subprocess = execa(this.binary, this.args, {
+      // stdin ignored: scrcpy doesn't read from it, and an inherited stdin
+      // could block if the parent terminal goes away.
+      stdin: 'ignore',
+      // buffer: false gives streams instead of accumulating in memory. On a
+      // multi-hour session, buffering would be a guaranteed leak.
+      buffer: false,
+      reject: false,
+      // Hides the child's console window on Windows (CREATE_NO_WINDOW).
+      // Investigated as a suspect during a hard-to-reproduce disconnect bug
+      // (real cause turned out to be OBS scene-creation timing on first
+      // run, see ROADMAP.md) and ruled out — reverted here to the safer
+      // default. Without it, a flashing console box is possible if
+      // obs-phonecast is ever launched without an already-visible console
+      // (e.g. packaged binary, future GUI dock).
+      windowsHide: true,
+      env: { ...process.env, ...this.env },
+    });
+
+    // scrcpy logs everything to stderr, including its informational messages.
+    if (this.subprocess.stderr) {
+      const rl = readline.createInterface({ input: this.subprocess.stderr });
+      rl.on('line', (line) => {
+        this.logs.push(line);
+        if (this.logs.length > LOG_RING_SIZE) this.logs.shift();
+        // We FORWARD lines, we never INTERPRET them. Log strings change
+        // between scrcpy versions; building logic on top of them would
+        // reintroduce exactly the fragility we avoid by relying on scrcpy
+        // instead of rewriting the pipeline.
+        this.emit('log', line);
+      });
+    }
+
+    this.subprocess.then(
+      (result) => this.#onExit(result),
+      (result) => this.#onExit(result),
+    );
+
+    return this;
+  }
+
+  #onExit(result) {
+    this.exitInfo = {
+      exitCode: result?.exitCode ?? null,
+      signal: result?.signal ?? null,
+      expected: this.stopping,
+    };
+    this.emit('exit', this.exitInfo);
+  }
+
+  /** Waits for the process to exit, whatever the cause. */
+  async waitForExit() {
+    if (this.exitInfo) return this.exitInfo;
+    return new Promise((resolve) => this.once('exit', resolve));
+  }
+
+  /**
+   * Clean shutdown, with escalation.
+   *
+   * @param {number} graceMs time given to cleanup before forcing
+   */
+  async stop({ graceMs = 4000 } = {}) {
+    if (!this.subprocess || this.exitInfo) return this.exitInfo;
+    this.stopping = true;
+
+    const pid = this.subprocess.pid;
+
+    if (process.platform === 'win32' && pid) {
+      // Without /F: a polite close request, cleanup gets to run.
+      // /T to include children (scrcpy spawns adb).
+      await execa('taskkill', ['/pid', String(pid), '/T'], { reject: false });
+    } else {
+      this.subprocess.kill('SIGTERM');
+    }
+
+    const exited = await this.#waitWithTimeout(graceMs);
+    if (exited) return this.exitInfo;
+
+    // Last resort. Important note: in --v4l2-sink mode there's no window,
+    // hence no message loop, hence taskkill without /F always fails and we
+    // systematically end up here. That's expected.
+    if (process.platform === 'win32' && pid) {
+      await execa('taskkill', ['/pid', String(pid), '/T', '/F'], { reject: false });
+    } else {
+      this.subprocess.kill('SIGKILL');
+    }
+
+    await this.#waitWithTimeout(2000);
+    return this.exitInfo;
+  }
+
+  #waitWithTimeout(ms) {
+    if (this.exitInfo) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms);
+      this.once('exit', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* High-level launch                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Builds the arguments, launches, and checks the process survives the first
+ * few hundred milliseconds.
+ *
+ * This short delay is worth it: a config error or a virtual display refused
+ * by the ROM almost always shows up within the first 500ms. Catching it here
+ * gives an immediate message instead of waiting for OBS's 15-second timeout.
+ */
+export async function launch({ binaries, config, onLog = null, settleMs = 600, logger = null }) {
+  const args = buildArgs(config);
+  const proc = new ScrcpyProcess({
+    binary: binaries.scrcpy,
+    args,
+    env: binaries.env,
+  }).start();
+
+  // Essential for diagnosing a gap between "it works by hand" and "it cuts
+  // out through obs-phonecast": without this, there's no way to know whether
+  // obs-phonecast actually builds the same command as the one tested manually.
+  logger?.info(`Command: ${proc.command}`);
+
+  if (onLog) proc.on('log', onLog);
+
+  await new Promise((r) => setTimeout(r, settleMs));
+
+  if (!proc.isAlive()) {
+    throw new ScrcpyLaunchError(
+      `scrcpy exited immediately (code ${proc.exitInfo?.exitCode}).`,
+      { stderr: proc.logs, command: proc.command, exitCode: proc.exitInfo?.exitCode },
+    );
+  }
+
+  return proc;
+}
+
+/**
+ * Guarantees no process outlives our own exit.
+ *
+ * Ctrl+C is handled asynchronously to leave time for cleanup.
+ * The 'exit' handler is synchronous by nature: it can only do a hard kill,
+ * it's a safety net, not the normal path.
+ */
+export function registerCleanup(getProcesses) {
+  let cleaning = false;
+
+  const graceful = async (signal) => {
+    if (cleaning) return;
+    cleaning = true;
+    for (const proc of getProcesses()) {
+      if (proc?.isAlive()) await proc.stop({ graceMs: 3000 });
+    }
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+
+  process.on('SIGINT', () => void graceful('SIGINT'));
+  process.on('SIGTERM', () => void graceful('SIGTERM'));
+
+  process.on('exit', () => {
+    for (const proc of getProcesses()) {
+      if (proc?.isAlive()) {
+        try {
+          proc.subprocess.kill('SIGKILL');
+        } catch {
+          /* nothing better to do in a synchronous handler */
+        }
+      }
+    }
+  });
+}
