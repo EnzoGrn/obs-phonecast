@@ -39,6 +39,8 @@
   "scripts": {
     "test": "node --test",
     "start": "node src/index.js",
+    "prebuild": "node scripts/embed-dock.js",
+    "prebuild:win": "node scripts/embed-dock.js",
     "build": "bun build --compile ./src/index.js --outfile dist/obs-phonecast",
     "build:win": "bun build --compile --target=bun-windows-x64 ./src/index.js --outfile dist/obs-phonecast.exe"
   },

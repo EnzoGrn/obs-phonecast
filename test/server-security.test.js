@@ -87,3 +87,34 @@ test('IPv6 wildcard bind accepts an IPv6 literal Host', () => {
   const wild = { host: '::', hostHeader: '[fd00::5]:7412' };
   assert.equal(isAllowedOrigin('http://[fd00::5]:7412', 7412, wild), true);
 });
+
+/* --- dock page loading ------------------------------------------------------- */
+
+test('loadDockHtml reads web/index.html from disk when present', async () => {
+  const { loadDockHtml } = await import('../src/server/index.js');
+  const html = await loadDockHtml();
+  assert.match(html, /<title>|obs-phonecast/);
+});
+
+// Order matters: Node caches the generated module once it has been imported,
+// so the "nothing embedded" case has to run before the fallback case.
+test('loadDockHtml explains itself when there is no page at all', async () => {
+  const { loadDockHtml } = await import('../src/server/index.js');
+  await assert.rejects(
+    () => loadDockHtml({ htmlPath: '/definitely/not/here.html' }),
+    /embed-dock/,
+  );
+});
+
+test('loadDockHtml falls back to the embedded copy when the file is missing', async () => {
+  const { writeFile, rm } = await import('node:fs/promises');
+  const { loadDockHtml } = await import('../src/server/index.js');
+  const generated = new URL('../src/server/dock-html.generated.js', import.meta.url);
+  await writeFile(generated, 'export default "<html>embedded</html>";\n');
+  try {
+    const html = await loadDockHtml({ htmlPath: '/definitely/not/here.html' });
+    assert.equal(html, '<html>embedded</html>');
+  } finally {
+    await rm(generated, { force: true });
+  }
+});
