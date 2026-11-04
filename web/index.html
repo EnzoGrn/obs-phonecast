@@ -268,6 +268,11 @@
     launcher mode
   </label>
 
+  <label class="switch">
+    <input type="checkbox" id="audioCheck" />
+    capture audio
+  </label>
+
   <button id="onAirBtn">Start</button>
 
   <details id="settingsPanel">
@@ -311,6 +316,7 @@
   const appSelect = document.getElementById('appSelect');
   const refreshBtn = document.getElementById('refreshBtn');
   const launcherCheck = document.getElementById('launcherCheck');
+  const audioCheck = document.getElementById('audioCheck');
   const onAirBtn = document.getElementById('onAirBtn');
   const logs = document.getElementById('logs');
 
@@ -373,15 +379,23 @@
   function onStatus(message) {
     sessionState = message.state;
     const running = sessionState === 'running';
+    const starting = sessionState === 'starting';
+    const busy = running || starting;
 
-    appSelect.disabled = running;
-    launcherCheck.disabled = running;
+    appSelect.disabled = busy;
+    launcherCheck.disabled = busy;
+    audioCheck.disabled = busy;
     logs.classList.toggle('live', running);
 
     onAirBtn.classList.toggle('live', running);
-    onAirBtn.textContent = running ? `Stop (${message.mode})` : 'Start';
+    // While starting the button stays inert: a second click would only be
+    // rejected by the bridge. Cancelling mid-start is possible over the
+    // protocol (type: 'stop') but is not offered in the UI.
+    onAirBtn.disabled = starting;
+    onAirBtn.textContent = running ? `Stop (${message.mode})` : starting ? 'Starting...' : 'Start';
 
-    if (running) setStatus('running', 'on air');
+    if (starting) setStatus('', 'starting');
+    else if (running) setStatus('running', 'on air');
     else setStatus('connected', message.reason ? `stopped (${message.reason})` : 'idle');
   }
 
@@ -400,6 +414,33 @@
       return null;
     }
   }
+
+  // Same reasoning, generalized: launcher mode and audio capture are both
+  // per-session choices made via a checkbox, with no explicit "save" step
+  // -- exactly the shape that silently resets on a dock reconnect or a
+  // full page reload unless it's persisted somewhere that survives both.
+  function rememberBool(key, value) {
+    try {
+      localStorage.setItem(key, value ? '1' : '0');
+    } catch { /* storage unavailable: the dock still works, just without memory */ }
+  }
+  function recallBool(key, fallback = false) {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? fallback : v === '1';
+    } catch {
+      return fallback;
+    }
+  }
+
+  launcherCheck.checked = recallBool('obs-phonecast:launcher');
+  audioCheck.checked = recallBool('obs-phonecast:audio');
+  launcherCheck.addEventListener('change', () =>
+    rememberBool('obs-phonecast:launcher', launcherCheck.checked),
+  );
+  audioCheck.addEventListener('change', () =>
+    rememberBool('obs-phonecast:audio', audioCheck.checked),
+  );
 
   function onApps(apps) {
     appsLoaded = true;
@@ -540,7 +581,12 @@
     if (sessionState === 'running') {
       send({ type: 'stop' });
     } else {
-      send({ type: 'start', app: appSelect.value || null, launcher: launcherCheck.checked });
+      send({
+        type: 'start',
+        app: appSelect.value || null,
+        launcher: launcherCheck.checked,
+        audio: audioCheck.checked,
+      });
     }
   });
 

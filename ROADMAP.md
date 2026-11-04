@@ -14,6 +14,54 @@ Caveats:
 - only works if OBS runs on the same machine
 - exact file name and key still need confirming, not yet verified
 
+### No-terminal launch -- done, via an OBS script (not double-click launchers)
+`launchers/obs-phonecast-autostart.lua` starts `obs-phonecast --dock`
+automatically when OBS itself launches, and stops it when OBS closes.
+Added via OBS's own Tools → Scripts → +; Lua needs nothing extra
+installed, unlike the Python scripting path.
+
+**Per-OS double-click launcher scripts (`.bat`/`.command`/`.sh`/`.desktop`)
+were built first, then deliberately removed.** The real problem, found
+only after building them: distributing them meant asking a streamer to
+download and run a raw script file from a link -- exactly the shape of a
+phishing attack, and a reasonable person (or antivirus) should be
+suspicious of it regardless of how legitimate the actual file is. Trust,
+not effort, was the blocker, so more scripting wouldn't have fixed it.
+Also confirmed along the way: bundling them in the npm package's `files`
+doesn't help either, since a global npm install buries them inside npm's
+own module directory, not anywhere a streamer would look.
+
+The OBS script sidesteps the trust problem entirely: it's added through
+OBS's own Scripts menu, an interface already trusted, rather than a
+downloaded executable. It only wraps the already-published
+`obs-phonecast --dock` command, so no compilation or code signing is
+needed either.
+
+**Honest status**: reasoned through and verified as far as possible
+without a real OBS install --
+- Lua syntax validated with a real compiler (`luac`).
+- The script's own logic (`script_load`, `script_properties`,
+  `script_update`, the restart button, `script_unload`) exercised against
+  a hand-written fake of the `obslua` API, catching real runtime errors a
+  syntax check alone wouldn't (undefined calls, wrong arg counts).
+- The core background-process mechanism (spawn detached, capture the PID
+  via `io.popen` + `$!`, confirm it's alive, kill it, confirm it's gone)
+  verified for real on Linux, including through Lua's own `io.popen`, not
+  just reasoned about.
+
+Not verified: the Windows branch (PowerShell nested inside `io.popen`'s
+shell quoting -- exactly the kind of thing that looks right and isn't),
+and the whole thing loaded into an actual OBS instance. This project had
+no OBS install available while building it. If it fails, OBS's own
+"Script log" panel (Tools → Scripts) will show exactly where, since every
+meaningful step logs through `obs.script_log()`.
+
+The standalone compiled binary (`bun build --compile`, still scoped in
+"Before publishing" above) remains the more complete answer for someone
+with zero command-line exposure at all -- the OBS script still requires
+`npm install -g obs-phonecast` once, from a terminal, before OBS can find
+it on PATH.
+
 ### First-run wizard -- done
 Implemented as `--init` (`src/init.js`, `src/prompt.js`). Prompts for the OBS
 WebSocket password (masked, on a real TTY) and a default app, writes the
@@ -87,6 +135,21 @@ that's a general OS-level boundary no local, unauthenticated tool fully
 closes. If that threat model matters to you, don't run the dock at all;
 use the CLI directly.
 
+**Hardening added after an audit** (all covered by tests):
+
+4. **Host header check, and `--dock-host` origins.** `isAllowedOrigin` also
+   rejects a `Host` header that is not loopback, the configured
+   `--dock-host`, or (on a wildcard bind) an IP literal. A DNS-rebinding
+   page is same-origin with itself, so its Origin alone looks fine; its
+   host *name* gives it away. A LAN origin equal to the configured host is
+   now accepted, which `--dock-host` needs in order to be usable at all.
+5. **`start` is serialized.** The bridge has an explicit `starting` state set
+   before the first `await`: two concurrent starts launch one session, and
+   a `stop` during startup cancels once the session exists.
+6. **The config file is `0600` in a `0700` folder and written atomically**
+   (temp file + rename), through one function shared by `--init` and the
+   dock. `saveConfig` validates `obs.port`, `display.dpi`, `video.bitrate`.
+
 Still open: changing the running app without restarting scrcpy (the
 `adb shell am start --display <id>` mechanism), and exposing more of the
 config surface in the settings panel than the five fields currently
@@ -139,7 +202,7 @@ run by hand with OBS capturing the same way, never showed this problem.
 
 3. **`windowsHide: true` in the execa spawn options.** Hypothesis: hiding
    the child's console window somehow affected the SDL window's behavior.
-   Reverted to `false` to test. Ruled out by a dedicated isolated repro
+   Temporarily set to `false` to test (it is `true` again in the code). Ruled out by a dedicated isolated repro
    script (`scripts/diag-spawn.js`) that spawns the exact same command via
    execa, with no orchestrator, no OBS, and no adb layer around it: it
    never disconnected, with `windowsHide` either way. This definitively
@@ -154,7 +217,9 @@ run by hand with OBS capturing the same way, never showed this problem.
    was cleaning up after a normal exit, with zero error output on the
    scrcpy side. This was a REAL bug, fixed by attaching a listener before
    the first connection attempt (see `src/obs/client.js`), plus a global
-   `uncaughtException` / `unhandledRejection` safety net in `index.js`.
+   `uncaughtException` / `unhandledRejection` safety net in `index.js`
+   (since changed: it now runs cleanup and exits non-zero instead of
+   carrying on, except for OBS websocket rejections; see `src/fatal.js`).
    However: fixing it did not, by itself, make the disconnects stop. It
    was a real bug worth fixing regardless, just not *the* explanation for
    this specific symptom.
@@ -212,9 +277,44 @@ fallback logic, not something external.
   occur; worth double-checking the equivalent SIGTERM path on Linux
   instead
 
+## Audit follow-up (fixed)
+
+From a full audit of the repo; each item has a commit and a test.
+
+- Launcher crop now re-synced when scene + source already exist (a partial
+  `SetSceneItemTransform` with only the crop fields; position and size stay
+  the user's). Only a crop WE applied is ever updated or cleared: what was
+  last applied is remembered (`src/obs/crop-memory.js`, cache folder) and
+  compared with what OBS has now, so a crop set by hand in OBS is kept.
+  An explicit `--crop-top`/`--crop-bottom` (or `decorationCrop`) still wins.
+  With no record, an existing non-zero crop is kept (conservative).
+- Dock: when the watcher ends on its own (gave up after 5 restarts, or threw),
+  the session is now released (OBS connection, screen-off timeout, cleanup
+  registry) before going idle; before, only the CLI did that.
+- Dock: `starting` state, no double start, `stop` during startup, watcher
+  failures reset to idle; `--dock-host` usable from another device.
+- Unknown CLI options and an unreadable config file are reported as user
+  errors (exit 1), not as bugs.
+- `--crop-top` alone keeps the DPI-derived bottom crop.
+- Ctrl+C / SIGTERM / fatal errors restore the phone's screen-off timeout and
+  disconnect OBS (5 s global timeout); one set of process listeners for the
+  whole program instead of one per session.
+- Watchdog: `stop()` during the restart delay no longer relaunches scrcpy;
+  a failed relaunch no longer logs the same crash twice.
+- Compiled binaries serve the dock (page embedded by
+  `scripts/embed-dock.js`); CI compiles the Linux binary and smoke-tests
+  `--help` and `--dock`.
+- Release workflow: least-privilege permissions, actions pinned by SHA,
+  scrcpy zip checked against a pinned SHA256, `npm ci` instead of a bun
+  lockfile that does not exist.
+- Ports validated (`--obs-port`, `--dock-port`, `OBS_PHONECAST_PORT`);
+  `OBS_PHONECAST_SCRCPY/ADB` paths are no longer reported as "bundled";
+  `adb` is searched next to the scrcpy found; `--launcher` implies control.
+
 ## Before publishing
 
-- [ ] packaging (`bun build --compile` or Node SEA)
+- [x] packaging: `bun build --compile` works, dock included (verified on a
+      Windows binary; a Linux CI job is configured but has not run yet; macOS never run)
 - [ ] code signing -- Gatekeeper blocks without a Developer ID, SmartScreen
       warns without reputation
 

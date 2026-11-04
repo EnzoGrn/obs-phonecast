@@ -1,12 +1,13 @@
 /**
  * Configuration loading.
- * Priority: CLI arguments > user file > defaults.
+ * Priority: CLI arguments > environment > user file > defaults.
  */
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { defaultConfig, Mode } from './scrcpy/args.js';
+import { defaultConfig, Mode, ConfigError } from './scrcpy/args.js';
+import { ErrorCode } from './errors.js';
 import { configDir } from './paths.js';
 
 export const CONFIG_FILENAME = 'obs-phonecast.json';
@@ -81,8 +82,44 @@ async function readJsonIfExists(file) {
     return JSON.parse(await readFile(file, 'utf8'));
   } catch (err) {
     if (err.code === 'ENOENT') return {};
-    throw new Error(`Config unreadable (${file}): ${err.message}`);
+    // A broken file is the user's to fix, not an obs-phonecast bug: raise a
+    // user-facing error that names the file, instead of a bare Error that
+    // the CLI would report as a bug with a stack trace.
+    throw new ConfigError(`Config file could not be read: ${err.message}`, {
+      code: ErrorCode.CONFIG_UNREADABLE,
+      hint: `Fix or delete this file, then try again: ${file}`,
+    });
   }
+}
+
+/**
+ * Turns a node:util parseArgs failure (unknown option, missing value...)
+ * into a user-facing ConfigError. Anything else is returned untouched, so a
+ * genuine bug is still reported as one.
+ */
+export function wrapParseArgsError(err) {
+  if (typeof err?.code === 'string' && err.code.startsWith('ERR_PARSE_ARGS_')) {
+    return new ConfigError(err.message, {
+      hint: 'Run obs-phonecast --help to see the available options.',
+    });
+  }
+  return err;
+}
+
+/**
+ * A TCP port from user input (--obs-port, OBS_PHONECAST_PORT...). Number()
+ * alone turns "abc" into NaN and "44 55" into NaN, which then reached
+ * obs-websocket as ws://localhost:NaN; fail early with a clear message.
+ */
+export function parsePort(value, label) {
+  const text = String(value).trim();
+  const port = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new ConfigError(`Invalid ${label}: "${value}" (expected a port from 1 to 65535).`, {
+      hint: 'Example: 4455',
+    });
+  }
+  return port;
 }
 
 /**
@@ -94,7 +131,7 @@ async function readJsonIfExists(file) {
 function fromEnv() {
   const obs = {};
   if (process.env.OBS_PHONECAST_PASSWORD) obs.password = process.env.OBS_PHONECAST_PASSWORD;
-  if (process.env.OBS_PHONECAST_PORT) obs.port = Number(process.env.OBS_PHONECAST_PORT);
+  if (process.env.OBS_PHONECAST_PORT) obs.port = parsePort(process.env.OBS_PHONECAST_PORT, 'OBS_PHONECAST_PORT');
   if (process.env.OBS_PHONECAST_HOST) obs.host = process.env.OBS_PHONECAST_HOST;
   return Object.keys(obs).length ? { obs } : {};
 }

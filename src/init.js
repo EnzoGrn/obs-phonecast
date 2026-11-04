@@ -11,11 +11,11 @@
  * directly, so the flow itself stays testable without a real TTY.
  */
 
-import { mkdir, writeFile, access } from 'node:fs/promises';
-import path from 'node:path';
+import { access } from 'node:fs/promises';
 
 import { configPath } from './config.js';
 import { createPrompt } from './prompt.js';
+import { writeRawConfig } from './settings.js';
 
 /** Pure: turns collected answers into the object to write as JSON. */
 export function buildInitConfig({ password = '', app = '' } = {}) {
@@ -74,8 +74,8 @@ export async function runInit({
 
   const config = buildInitConfig({ password, app });
 
-  await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(target, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  // Shared with the dock's save: atomic, and 0600 because of the password.
+  await writeRawConfig(config, target);
 
   logger.info('');
   logger.info(`Config written to ${target}`);

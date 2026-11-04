@@ -7,37 +7,21 @@
  */
 
 import { parseArgs } from 'node:util';
+import { exec } from 'node:child_process';
 
-import { loadConfig, configPath } from './config.js';
+import { loadConfig, configPath, wrapParseArgsError, parsePort } from './config.js';
 import { Mode } from './scrcpy/args.js';
 import { createLogger } from './logger.js';
+import { installFatalHandlers } from './fatal.js';
 import { isExpectedError, formatError } from './errors.js';
 
 // The orchestrator is imported dynamically inside main(): it pulls in
 // execa and obs-websocket-js, and --help must work BEFORE any npm install.
 // That's the first command anyone discovering the tool will run.
 
-/**
- * General safety net against silent process crashes.
- *
- * A real bug we hit: an OBS connection with no dedicated error handler
- * (fixed in obs/client.js) crashed Node on a simple network blip, and the
- * scrcpy cleanup on `process.on('exit')` then killed the stream, believing
- * it was cleaning up after a normal exit -- with not a single error line
- * on the scrcpy side to explain it. This net covers the same root cause
- * coming from elsewhere (another dependency, an unlistened event): a loud
- * warning beats a silent disconnect mid-stream.
- */
-process.on('uncaughtException', (err) => {
-  process.stderr.write(
-    `\nUnhandled exception (stream continues if possible): ${err?.stack ?? err}\n`,
-  );
-});
-process.on('unhandledRejection', (reason) => {
-  process.stderr.write(
-    `\nUnhandled promise rejection (stream continues if possible): ${reason}\n`,
-  );
-});
+// Uncaught errors restore state (screen timeout, OBS) and exit non-zero; see
+// fatal.js for why this no longer carries on, and the one benign exception.
+installFatalHandlers();
 
 const options = {
   app: { type: 'string' },
@@ -57,6 +41,7 @@ const options = {
   'no-fallback': { type: 'boolean' },
   'no-restart': { type: 'boolean' },
   'no-keep-active': { type: 'boolean' },
+  borderless: { type: 'boolean' },
   'extend-screen-timeout': { type: 'boolean' },
   'capture-method': { type: 'string' },
   launcher: { type: 'boolean', short: 'l' },
@@ -73,6 +58,7 @@ const options = {
   dock: { type: 'boolean' },
   'dock-port': { type: 'string' },
   'dock-host': { type: 'string' },
+  'no-open': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 };
 
@@ -100,6 +86,10 @@ Setup
                        else exposes the panel -- and the ability to read
                        or overwrite your OBS password -- to that address's
                        reach; only do this on a network you trust.
+  --no-open            don't automatically open the dock URL in the
+                       default browser (it opens by default, so someone
+                       who isn't comfortable with a terminal still sees
+                       proof it's working without copying a URL by hand).
 
 Applications
   --list-apps          list the phone's applications, then exit
@@ -136,6 +126,11 @@ Capture
                        idle); note it did NOT, by itself, fix a separate
                        disconnect issue we investigated (see
                        --extend-screen-timeout below and ROADMAP.md).
+  --borderless         hide the scrcpy window's title bar and OS border
+                       on this PC. Off by default: OBS already captures
+                       just the video content regardless, so keeping the
+                       normal title bar gives you a real window you can
+                       move, minimize, or close by hand.
   --extend-screen-timeout  extends the physical screen's sleep timeout to
                        30 min for the session (restored on exit). OFF BY
                        DEFAULT: its premise (fixing a documented scrcpy
@@ -159,7 +154,10 @@ Video
   --encoder <name>     force a specific encoder (see scrcpy --list-encoders).
                        First thing to try if the image has artifacts.
   --audio              also capture the phone's audio (Android 11+)
-  --control            allow mouse control
+  --control            allow mouse control. Implied by --app and by
+                       --launcher (launching an app, or driving the
+                       launcher, both go through the control channel);
+                       without either, scrcpy runs read-only.
 
 OBS
   --obs-port <n>       default 4455
@@ -209,6 +207,7 @@ function buildOverrides(values) {
   if (values.serial) o.serial = values.serial;
   if (values['no-fallback']) o.noFallback = true;
   if (values['no-keep-active']) o.keepActive = false;
+  if (values.borderless) o.windowBorderless = true;
   if (values['extend-screen-timeout']) o.extendScreenTimeout = true;
   if (values['capture-method']) o.windowCaptureMethod = Number(values['capture-method']);
   if (values.launcher) o.launcher = true;
@@ -216,7 +215,7 @@ function buildOverrides(values) {
   const crop = {};
   if (values['crop-top']) crop.top = Number(values['crop-top']);
   if (values['crop-bottom']) crop.bottom = Number(values['crop-bottom']);
-  if (Object.keys(crop).length) o.decorationCrop = { left: 0, right: 0, ...crop };
+  if (Object.keys(crop).length) o.decorationCrop = crop;
   if (values.v4l2) o.v4l2Sink = values.v4l2;
 
   if (values.mode) {
@@ -242,7 +241,7 @@ function buildOverrides(values) {
 
   const obs = {};
   if (values['obs-password']) obs.password = values['obs-password'];
-  if (values['obs-port']) obs.port = Number(values['obs-port']);
+  if (values['obs-port']) obs.port = parsePort(values['obs-port'], '--obs-port');
   if (values.scene) obs.sceneName = values.scene;
   if (values.switch) obs.switchToScene = true;
   if (Object.keys(obs).length) o.obs = obs;
@@ -254,9 +253,12 @@ function buildOverrides(values) {
  * A single logger for the whole process. The level comes from the flags,
  * and the sink stays stderr until the dock exists.
  */
+function logLevelFor(values) {
+  return values.quiet ? 'error' : values.verbose ? 'debug' : 'info';
+}
+
 function makeLogger(values) {
-  const level = values.quiet ? 'error' : values.verbose ? 'debug' : 'info';
-  return createLogger({ level });
+  return createLogger({ level: logLevelFor(values) });
 }
 
 /**
@@ -300,8 +302,37 @@ async function printApps(config, values, logger) {
   );
 }
 
+/**
+ * Best-effort: opens the system default browser at the given URL.
+ *
+ * Deliberately non-fatal on failure -- this runs on a headless server, or
+ * a machine with no browser configured, often enough that it must never
+ * take the dock down with it. Uses the OS's own "open a URL" command
+ * rather than a package, since it's a single fire-and-forget call and
+ * node:child_process is already built in.
+ */
+function openInBrowser(url, logger) {
+  const command =
+    process.platform === 'win32'
+      ? `start "" "${url}"`
+      : process.platform === 'darwin'
+        ? `open "${url}"`
+        : `xdg-open "${url}"`;
+
+  exec(command, (err) => {
+    if (err) {
+      logger.debug(`Could not auto-open a browser (${err.message}). Open the URL above by hand.`);
+    }
+  });
+}
+
 async function main() {
-  const { values } = parseArgs({ options, allowPositionals: false });
+  let values;
+  try {
+    ({ values } = parseArgs({ options, allowPositionals: false }));
+  } catch (err) {
+    throw wrapParseArgsError(err);
+  }
 
   if (values.help) {
     process.stdout.write(HELP);
@@ -318,14 +349,23 @@ async function main() {
 
   if (values.dock) {
     const { startDockServer } = await import('./server/index.js');
-    const port = values['dock-port'] ? Number(values['dock-port']) : undefined;
+    const port = values['dock-port'] ? parsePort(values['dock-port'], '--dock-port') : undefined;
     const host = values['dock-host'] || undefined;
-    const { url, close } = await startDockServer({ port, host, logger });
+    const { url, close } = await startDockServer({
+      port,
+      host,
+      logger,
+      logLevel: logLevelFor(values),
+    });
 
     logger.info('');
     logger.info(`Dock ready at ${url}`);
     logger.info('In OBS: Docks menu > Custom Browser Docks, paste that URL, give it a name.');
     logger.info('Ctrl+C to stop.');
+
+    if (!values['no-open']) {
+      openInBrowser(url, logger);
+    }
 
     // Keep the process alive until interrupted; the HTTP server already
     // does this on its own, but an explicit handler lets us close cleanly

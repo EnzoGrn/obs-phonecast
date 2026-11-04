@@ -36,3 +36,96 @@ test('a malformed Origin header is rejected, not thrown on', () => {
 test('IPv6 loopback is recognized', () => {
   assert.equal(isAllowedOrigin('http://[::1]:7412', 7412), true);
 });
+
+/* --- --dock-host on a LAN address ------------------------------------------- */
+
+const LAN = { host: '192.168.1.20', hostHeader: '192.168.1.20:7412' };
+
+test('the configured LAN host is accepted as an origin', () => {
+  assert.equal(isAllowedOrigin('http://192.168.1.20:7412', 7412, LAN), true);
+});
+
+test('a LAN origin is still rejected without a matching --dock-host', () => {
+  assert.equal(isAllowedOrigin('http://192.168.1.20:7412', 7412), false);
+});
+
+test('a different port on the configured LAN host is rejected', () => {
+  assert.equal(isAllowedOrigin('http://192.168.1.20:9999', 7412, LAN), false);
+});
+
+test('a third-party site is still rejected when a LAN host is configured', () => {
+  assert.equal(isAllowedOrigin('https://evil.example.com', 7412, LAN), false);
+  assert.equal(isAllowedOrigin('http://192.168.1.99:7412', 7412, LAN), false);
+});
+
+test('loopback stays allowed alongside a configured LAN host', () => {
+  assert.equal(isAllowedOrigin('http://localhost:7412', 7412, { ...LAN, hostHeader: 'localhost:7412' }), true);
+});
+
+test('a Host header that does not match is rejected (DNS rebinding)', () => {
+  // The rebinding page is same-origin with itself, so Origin alone passes.
+  const rebind = { host: '127.0.0.1', hostHeader: 'evil.example.com:7412' };
+  assert.equal(isAllowedOrigin('http://evil.example.com:7412', 7412, rebind), false);
+  assert.equal(isAllowedOrigin(undefined, 7412, rebind), false);
+});
+
+test('Host header with the wrong port is rejected', () => {
+  assert.equal(isAllowedOrigin(undefined, 7412, { host: '127.0.0.1', hostHeader: '127.0.0.1:80' }), false);
+});
+
+test('wildcard bind: origin must match the Host header and be an IP literal', () => {
+  const wild = { host: '0.0.0.0', hostHeader: '192.168.1.20:7412' };
+  assert.equal(isAllowedOrigin('http://192.168.1.20:7412', 7412, wild), true);
+  // Origin from a different address than the one the request was sent to.
+  assert.equal(isAllowedOrigin('http://192.168.1.77:7412', 7412, wild), false);
+  // A DNS name is what a rebinding attack uses.
+  const named = { host: '0.0.0.0', hostHeader: 'evil.example.com:7412' };
+  assert.equal(isAllowedOrigin('http://evil.example.com:7412', 7412, named), false);
+});
+
+test('IPv6 wildcard bind accepts an IPv6 literal Host', () => {
+  const wild = { host: '::', hostHeader: '[fd00::5]:7412' };
+  assert.equal(isAllowedOrigin('http://[fd00::5]:7412', 7412, wild), true);
+});
+
+/* --- dock page loading ------------------------------------------------------- */
+
+test('loadDockHtml reads web/index.html from disk when present', async () => {
+  const { loadDockHtml } = await import('../src/server/index.js');
+  const html = await loadDockHtml();
+  assert.match(html, /<title>|obs-phonecast/);
+});
+
+test('loadDockHtml falls back to the embedded copy when the file is missing', async () => {
+  const { loadDockHtml } = await import('../src/server/index.js');
+  const html = await loadDockHtml({
+    htmlPath: '/definitely/not/here.html',
+    loadEmbedded: async () => ({ default: '<html>embedded</html>' }),
+  });
+  assert.equal(html, '<html>embedded</html>');
+});
+
+test('loadDockHtml explains itself when there is no page at all', async () => {
+  const { loadDockHtml } = await import('../src/server/index.js');
+  await assert.rejects(
+    () =>
+      loadDockHtml({
+        htmlPath: '/definitely/not/here.html',
+        loadEmbedded: async () => {
+          throw new Error('Cannot find module');
+        },
+      }),
+    /embed-dock/,
+  );
+});
+
+/* --- displayed URL ----------------------------------------------------------- */
+
+test('dockUrl shows a usable URL for loopback, wildcard and IPv6 hosts', async () => {
+  const { dockUrl } = await import('../src/server/index.js');
+  assert.equal(dockUrl('127.0.0.1', 7412), 'http://127.0.0.1:7412');
+  assert.equal(dockUrl('0.0.0.0', 7412), 'http://localhost:7412');
+  assert.equal(dockUrl('::', 7412), 'http://localhost:7412');
+  assert.equal(dockUrl('::1', 7412), 'http://[::1]:7412');
+  assert.equal(dockUrl('192.168.1.20', 7412), 'http://192.168.1.20:7412');
+});

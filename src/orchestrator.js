@@ -20,7 +20,7 @@
  * try, then fall back.
  */
 
-import { Mode, deriveCrop, deriveDecorationCrop, WINDOW_TITLE } from './scrcpy/args.js';
+import { Mode, deriveCrop, resolveDecorationCrop, WINDOW_TITLE } from './scrcpy/args.js';
 import { resolveBinaries } from './scrcpy/binary.js';
 import { launch, registerCleanup, ScrcpyLaunchError } from './scrcpy/process.js';
 import {
@@ -32,13 +32,35 @@ import {
 import { findApp, looksLikePackage } from './scrcpy/app-list.js';
 import { listApps } from './scrcpy/apps.js';
 import { connectObs, disconnectObs } from './obs/client.js';
+import { createCropMemory } from './obs/crop-memory.js';
 import { setupScene, teardownScene, WindowNotFoundError, SceneError } from './obs/scene.js';
 import { isWayland } from './obs/platform.js';
 import { silentLogger } from './logger.js';
 
 export async function startSession(config, { logger = silentLogger } = {}) {
   const active = { proc: null };
-  registerCleanup(() => [active.proc]);
+  // What a Ctrl+C (or a failed start) must be able to put back: the phone's
+  // screen-off timeout and the OBS connection. Filled in as startSessionImpl
+  // makes each change.
+  const undo = { restoreTimeout: null, obs: null };
+  const runUndo = async () => {
+    await undo.restoreTimeout?.();
+    if (undo.obs) await disconnectObs(undo.obs);
+  };
+  const unregister = registerCleanup(() => [active.proc], { hook: runUndo });
+
+  try {
+    return await startSessionImpl(config, { logger, active, undo, runUndo, unregister });
+  } catch (err) {
+    // A failed start leaves nothing running, but may have extended the
+    // screen timeout before failing.
+    await runUndo().catch(() => {});
+    unregister();
+    throw err;
+  }
+}
+
+async function startSessionImpl(config, { logger, active, undo, runUndo, unregister }) {
 
   // --- 1. Binaries --------------------------------------------------------
   const binaries = await resolveBinaries();
@@ -75,6 +97,16 @@ export async function startSession(config, { logger = silentLogger } = {}) {
       originalScreenTimeout = await getScreenOffTimeout(binaries, device.serial);
       if (originalScreenTimeout != null) {
         await setScreenOffTimeout(binaries, device.serial, config.screenTimeoutMs);
+        let restored = false;
+        undo.restoreTimeout = async () => {
+          if (restored) return;
+          restored = true;
+          // Must never make shutdown fail: better to leave the extended
+          // timeout in place than to crash session teardown over it.
+          await setScreenOffTimeout(binaries, device.serial, originalScreenTimeout).catch(
+            (err) => logger.warn(`Failed to restore screen-off timeout: ${err.message}`),
+          );
+        };
         logger.info(
           `Screen-off timeout extended to ${Math.round(config.screenTimeoutMs / 60000)} min ` +
             `(restored on exit).`,
@@ -125,6 +157,7 @@ export async function startSession(config, { logger = silentLogger } = {}) {
 
   // --- 4. OBS ---------------------------------------------------------------
   const { obs, obsWebSocketVersion } = await connectObs({ ...config.obs, logger });
+  undo.obs = obs;
   logger.info(`OBS connected (websocket ${obsWebSocketVersion})`);
 
   // Wayland doesn't allow selecting the window programmatically. Better to
@@ -185,8 +218,15 @@ export async function startSession(config, { logger = silentLogger } = {}) {
         // decorations, there's nothing to remove.
         crop:
           attempt.mode === Mode.VIRTUAL && attempt.launcher
-            ? (config.decorationCrop ?? deriveDecorationCrop({ dpi: attempt.display.dpi }))
+            ? resolveDecorationCrop(config.decorationCrop, { dpi: attempt.display.dpi })
             : null,
+        // A crop asked for by name (--crop-top/--crop-bottom, or
+        // "decorationCrop" in the config) beats one the streamer set by
+        // hand in OBS; the automatic crop never does.
+        forceCrop:
+          attempt.mode === Mode.VIRTUAL && attempt.launcher && config.decorationCrop != null,
+        // Tells our crop from the streamer's on a source that already exists.
+        cropMemory: createCropMemory(),
         // On the last attempt there's no fallback left: a source that's in
         // place but poorly framed beats no source at all.
         strictFrame: index < attempts.length - 1,
@@ -201,11 +241,17 @@ export async function startSession(config, { logger = silentLogger } = {}) {
 
       logger.info(
         `Scene ready: "${scene.sceneName}" / "${scene.inputName}" (${scene.inputKind})` +
-          (scene.repositioned === false ? ' -- kept your existing position/size' : ''),
+          (scene.repositioned === false ? ' -- kept your existing position/size' : '') +
+          (scene.cropKept
+            ? ' -- kept the crop you set in OBS (use --crop-top/--crop-bottom to override)'
+            : ''),
       );
 
       return {
         mode: attempt.mode,
+        // Set by stop(): tells the watchdog the exit it sees is on purpose
+        // and that it must not relaunch scrcpy.
+        stopRequested: false,
         device: probe,
         scene,
         proc,
@@ -217,18 +263,13 @@ export async function startSession(config, { logger = silentLogger } = {}) {
         // already dead.
         _active: active,
         async stop({ removeSource = false } = {}) {
+          this.stopRequested = true;
           if (removeSource) await teardownScene(obs, { inputName: scene.inputName });
           // this.proc, not proc: after a restart, the current process is
           // no longer the one captured when the session was created.
           await this.proc.stop();
-          if (originalScreenTimeout != null) {
-            // Must never make shutdown fail: better to leave the extended
-            // timeout in place than to crash session teardown over it.
-            await setScreenOffTimeout(binaries, device.serial, originalScreenTimeout).catch(
-              (err) => logger.warn(`Failed to restore screen-off timeout: ${err.message}`),
-            );
-          }
-          await disconnectObs(obs);
+          await runUndo(); // restores the screen timeout, disconnects OBS
+          unregister();
         },
       };
     } catch (err) {
@@ -275,6 +316,7 @@ export function buildAttempts(config, probe) {
     // handled it, but this explicit list was silently dropping it. Check
     // this list whenever a new field is added to args.js.
     keepActive: config.keepActive,
+    windowBorderless: config.windowBorderless,
     v4l2Sink: config.v4l2Sink,
   };
 
@@ -345,19 +387,31 @@ function isRecoverable(err) {
  *
  * @returns {Promise<{reason: string, exitCode: number|null, restarts: number}>}
  */
-export async function watchSession(session, { logger, maxRestarts = 5, delayMs = 2000 } = {}) {
+export async function watchSession(
+  session,
+  { logger, maxRestarts = 5, delayMs = 2000, deps = { launch, setupScene } } = {},
+) {
   let restarts = 0;
+  let exit = null;
+  // True after a relaunch attempt that failed: the dead process's exit was
+  // already consumed (and reported), so waiting on it again would return
+  // instantly and log the same crash twice.
+  let retryOnly = false;
+
+  const stopped = () => ({ reason: 'stopped', exitCode: exit?.exitCode ?? null, restarts });
 
   for (;;) {
-    const exit = await session.proc.waitForExit();
+    if (!retryOnly) {
+      exit = await session.proc.waitForExit();
 
-    if (exit.expected) return { reason: 'stopped', exitCode: exit.exitCode, restarts };
+      if (exit.expected || session.stopRequested) return stopped();
 
-    logger.warn(`scrcpy exited unexpectedly (code ${exit.exitCode}).`);
-    // The last stderr lines ALWAYS say why. They were only surfaced at
-    // debug level: at the moment of a crash, that's exactly what you need
-    // to read.
-    for (const line of session.proc.logs.slice(-10)) logger.warn(`  scrcpy | ${line}`);
+      logger.warn(`scrcpy exited unexpectedly (code ${exit.exitCode}).`);
+      // The last stderr lines ALWAYS say why. They were only surfaced at
+      // debug level: at the moment of a crash, that's exactly what you need
+      // to read.
+      for (const line of session.proc.logs.slice(-10)) logger.warn(`  scrcpy | ${line}`);
+    }
 
     if (restarts >= maxRestarts) {
       logger.error(`Giving up after ${maxRestarts} restarts.`);
@@ -368,9 +422,14 @@ export async function watchSession(session, { logger, maxRestarts = 5, delayMs =
     logger.warn(`Restarting ${restarts}/${maxRestarts} in ${delayMs} ms...`);
     await new Promise((r) => setTimeout(r, delayMs));
 
+    // stop() can land during the delay (or during the launch below): it has
+    // already torn the session down, so relaunching would resurrect a
+    // scrcpy nobody is watching.
+    if (session.stopRequested) return stopped();
+
     try {
       const { binaries, attempt, sceneOptions } = session._relaunch;
-      const proc = await launch({
+      const proc = await deps.launch({
         binaries,
         config: attempt,
         onLog: (line) => logger.debug(`scrcpy | ${line}`),
@@ -379,14 +438,24 @@ export async function watchSession(session, { logger, maxRestarts = 5, delayMs =
       session.proc = proc;
       session._active.proc = proc;
 
-      await setupScene(session.obs, {
+      if (session.stopRequested) {
+        await proc.stop();
+        return stopped();
+      }
+
+      await deps.setupScene(session.obs, {
         ...sceneOptions,
         strictFrame: false,
         isProcessAlive: () => proc.isAlive(),
       });
       logger.info('Session restored.');
+      retryOnly = false;
     } catch (err) {
       logger.warn(`Restart failed: ${err.message}`);
+      // If launch succeeded but setupScene failed, session.proc is the new,
+      // live process: wait on it normally. Only a failed launch leaves the
+      // old, already-reported exit behind.
+      retryOnly = !session.proc.isAlive();
     }
   }
 }

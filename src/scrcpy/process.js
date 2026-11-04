@@ -79,13 +79,13 @@ export class ScrcpyProcess extends EventEmitter {
       // multi-hour session, buffering would be a guaranteed leak.
       buffer: false,
       reject: false,
-      // Hides the child's console window on Windows (CREATE_NO_WINDOW).
-      // Investigated as a suspect during a hard-to-reproduce disconnect bug
-      // (real cause turned out to be OBS scene-creation timing on first
-      // run, see ROADMAP.md) and ruled out — reverted here to the safer
-      // default. Without it, a flashing console box is possible if
-      // obs-phonecast is ever launched without an already-visible console
-      // (e.g. packaged binary, future GUI dock).
+      // Hides the child's console window on Windows (CREATE_NO_WINDOW), so no
+      // empty console box flashes up when obs-phonecast itself runs without
+      // a visible console (packaged binary, OBS Lua launcher, dock). It was
+      // suspected once in a hard-to-reproduce disconnect bug (the real cause
+      // turned out to be OBS scene-creation timing on first run, see
+      // ROADMAP.md) and ruled out. scrcpy's own SDL window is unaffected:
+      // it is a GUI window, not the console.
       windowsHide: true,
       env: { ...process.env, ...this.env },
     });
@@ -214,36 +214,111 @@ export async function launch({ binaries, config, onLog = null, settleMs = 600, l
 }
 
 /**
- * Guarantees no process outlives our own exit.
+ * Guarantees no process outlives our own exit, and that async state we
+ * changed on the phone or in OBS gets put back.
  *
- * Ctrl+C is handled asynchronously to leave time for cleanup.
- * The 'exit' handler is synchronous by nature: it can only do a hard kill,
- * it's a safety net, not the normal path.
+ * ONE set of process listeners for the whole program, reading a registry of
+ * active sessions. Registering per session leaked three listeners every
+ * time the dock started a session, and made the cleanup order depend on how
+ * many sessions had come and gone.
+ *
+ * Ctrl+C is handled asynchronously to leave time for cleanup: each entry's
+ * processes are stopped and its `hook` (restore the screen-off timeout,
+ * disconnect OBS...) is awaited, all bounded by a global timeout so a hung
+ * adb can't make the program unkillable. The 'exit' handler is synchronous
+ * by nature: it can only do a hard kill, it's a safety net, not the normal
+ * path.
+ *
+ * `proc`, `exit` and `timeoutMs` are injectable so this is testable without
+ * touching the real process.
  */
-export function registerCleanup(getProcesses) {
+export function createCleanupManager({
+  proc: host = process,
+  exit = (code) => process.exit(code),
+  timeoutMs = 5000,
+} = {}) {
+  const entries = new Set();
+  let installed = false;
   let cleaning = false;
 
-  const graceful = async (signal) => {
-    if (cleaning) return;
-    cleaning = true;
-    for (const proc of getProcesses()) {
-      if (proc?.isAlive()) await proc.stop({ graceMs: 3000 });
+  async function runAll() {
+    const tasks = [];
+    for (const entry of entries) {
+      for (const p of entry.getProcesses()) {
+        if (p?.isAlive()) tasks.push(p.stop({ graceMs: 3000 }));
+      }
+      // Run concurrently with the process stop: restoring a setting over
+      // adb does not depend on scrcpy having exited first.
+      if (entry.hook) tasks.push(Promise.resolve().then(entry.hook));
     }
-    process.exit(signal === 'SIGINT' ? 130 : 143);
-  };
+    await Promise.allSettled(tasks);
+  }
 
-  process.on('SIGINT', () => void graceful('SIGINT'));
-  process.on('SIGTERM', () => void graceful('SIGTERM'));
+  /** Runs every cleanup (bounded by timeoutMs), then exits with `code`. */
+  async function shutdown(code) {
+    if (cleaning) {
+      // A second signal while cleaning up means "stop waiting".
+      exit(code);
+      return;
+    }
+    cleaning = true;
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    await Promise.race([runAll(), deadline]);
+    clearTimeout(timer);
+    exit(code);
+  }
 
-  process.on('exit', () => {
-    for (const proc of getProcesses()) {
-      if (proc?.isAlive()) {
-        try {
-          proc.subprocess.kill('SIGKILL');
-        } catch {
-          /* nothing better to do in a synchronous handler */
+  function install() {
+    if (installed) return;
+    installed = true;
+    host.on('SIGINT', () => void shutdown(130));
+    host.on('SIGTERM', () => void shutdown(143));
+    host.on('exit', () => {
+      for (const entry of entries) {
+        for (const p of entry.getProcesses()) {
+          if (p?.isAlive()) {
+            try {
+              p.subprocess.kill('SIGKILL');
+            } catch {
+              /* nothing better to do in a synchronous handler */
+            }
+          }
         }
       }
-    }
-  });
+    });
+  }
+
+  /**
+   * @param {() => Array} getProcesses  current processes of this session
+   * @param {object} [options]
+   * @param {() => Promise<void>} [options.hook]  async cleanup, run on
+   *   SIGINT/SIGTERM/fatal error. Must be idempotent.
+   * @returns {() => void} unregister, to call once the session ended
+   *   normally and cleaned up after itself
+   */
+  function register(getProcesses, { hook = null } = {}) {
+    install();
+    const entry = { getProcesses, hook };
+    entries.add(entry);
+    return () => {
+      entries.delete(entry);
+    };
+  }
+
+  return { register, shutdown, size: () => entries.size };
+}
+
+const defaultCleanup = createCleanupManager();
+
+/** See createCleanupManager#register. Process-wide, idempotent. */
+export function registerCleanup(getProcesses, options) {
+  return defaultCleanup.register(getProcesses, options);
+}
+
+/** Runs all registered cleanups, then exits. Used by fatal-error handlers. */
+export function shutdownAndExit(code) {
+  return defaultCleanup.shutdown(code);
 }

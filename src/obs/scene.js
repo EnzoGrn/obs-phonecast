@@ -188,6 +188,65 @@ async function waitForSourceSize(obs, { sceneName, sceneItemId, timeoutMs = 15_0
   });
 }
 
+/** The four crop fields of a scene item transform; 0 when no crop is wanted. */
+function cropTransform(crop) {
+  return {
+    cropTop: crop?.top ?? 0,
+    cropBottom: crop?.bottom ?? 0,
+    cropLeft: crop?.left ?? 0,
+    cropRight: crop?.right ?? 0,
+  };
+}
+
+/** A crop as {top, bottom, left, right}, from our shape or an OBS transform. */
+function normalizeCrop(crop) {
+  return {
+    top: crop?.top ?? 0,
+    bottom: crop?.bottom ?? 0,
+    left: crop?.left ?? 0,
+    right: crop?.right ?? 0,
+  };
+}
+
+function cropFromTransform(t) {
+  return normalizeCrop({
+    top: t?.cropTop,
+    bottom: t?.cropBottom,
+    left: t?.cropLeft,
+    right: t?.cropRight,
+  });
+}
+
+const sameCrop = (a, b) =>
+  a.top === b.top && a.bottom === b.bottom && a.left === b.left && a.right === b.right;
+
+const isZeroCrop = (c) => sameCrop(c, { top: 0, bottom: 0, left: 0, right: 0 });
+
+/**
+ * On a scene item that already existed, decides whether the crop is ours to
+ * change. The streamer may have cropped it by hand in OBS, and that must
+ * survive a relaunch the same way a hand-set position does.
+ *
+ *   - already what we want            -> nothing to do
+ *   - same as what WE applied last    -> untouched since: ours, update it
+ *     time (from the memory file)
+ *   - no record, and no crop at all   -> nothing to lose, apply it
+ *   - anything else                   -> the user's own crop: keep it
+ *
+ * `force` (an explicit --crop-top/--crop-bottom, or "decorationCrop" in the
+ * config file) skips the question: a crop asked for by name is applied.
+ *
+ * @returns {Promise<'apply'|'unchanged'|'keep'>}
+ */
+async function decideCrop({ current, wanted, force, cropMemory, sceneName, inputName }) {
+  if (sameCrop(current, wanted)) return 'unchanged';
+  if (force) return 'apply';
+
+  const last = cropMemory ? await cropMemory.read(sceneName, inputName) : null;
+  if (last ? sameCrop(current, last) : isZeroCrop(current)) return 'apply';
+  return 'keep';
+}
+
 /**
  * Places the source via BOUNDS rather than by computing a scale.
  *
@@ -209,6 +268,18 @@ export async function placeSource(
      * image: OBS trims the pixels, then fits the rest into the box.
      */
     crop = null,
+    /**
+     * true: an explicitly requested crop (--crop-top/--crop-bottom, or
+     * "decorationCrop" in the config) is applied even over a crop the user
+     * set by hand. Without it, a hand-set crop on an existing item is kept.
+     */
+    forceCrop = false,
+    /**
+     * Remembers the crop we last applied, to tell "ours, untouched" from
+     * "set by hand". See crop-memory.js. null: no memory (tests, callers
+     * that don't care); the conservative fallback in decideCrop applies.
+     */
+    cropMemory = null,
     frameTimeoutMs = 15_000,
     /**
      * false: leave the scene item's transform exactly as it is. This is
@@ -229,10 +300,42 @@ export async function placeSource(
   // Kept even when we won't reposition: this is also what tells the caller
   // whether OBS actually received a frame at all, which drives the
   // virtual-display-vs-mirror fallback decision upstream.
-  await waitForSourceSize(obs, { sceneName, sceneItemId, timeoutMs: frameTimeoutMs });
+  const transform = await waitForSourceSize(obs, {
+    sceneName,
+    sceneItemId,
+    timeoutMs: frameTimeoutMs,
+  });
 
   if (!reposition) {
-    return { sceneItemId, repositioned: false };
+    // Position and size stay the user's. The crop follows the requested
+    // mode (launcher or not) -- unless the user cropped by hand, in which
+    // case that is theirs too. A partial transform only touches the four
+    // crop fields; OBS leaves the rest of the item's transform alone.
+    const wanted = normalizeCrop(crop);
+    const decision = await decideCrop({
+      current: cropFromTransform(transform),
+      wanted,
+      force: forceCrop,
+      cropMemory,
+      sceneName,
+      inputName,
+    });
+
+    if (decision === 'keep') {
+      // Not recorded: the memory keeps describing what WE applied, so the
+      // hand-set crop keeps reading as "not ours" on every later run.
+      return { sceneItemId, crop: cropFromTransform(transform), repositioned: false, cropKept: true };
+    }
+
+    if (decision === 'apply') {
+      await obs.call('SetSceneItemTransform', {
+        sceneName,
+        sceneItemId,
+        sceneItemTransform: cropTransform(crop),
+      });
+    }
+    await cropMemory?.write(sceneName, inputName, wanted);
+    return { sceneItemId, crop, repositioned: false, cropKept: false };
   }
 
   const { baseWidth, baseHeight } = await obs.call('GetVideoSettings');
@@ -256,13 +359,12 @@ export async function placeSource(
       alignment: 5, // OBS_ALIGN_LEFT | OBS_ALIGN_TOP
       positionX,
       positionY: marginPx,
-      cropTop: crop?.top ?? 0,
-      cropBottom: crop?.bottom ?? 0,
-      cropLeft: crop?.left ?? 0,
-      cropRight: crop?.right ?? 0,
+      ...cropTransform(crop),
       rotation: 0,
     },
   });
+
+  await cropMemory?.write(sceneName, inputName, normalizeCrop(crop));
 
   return { sceneItemId, boxWidth, boxHeight, positionX, crop, repositioned: true };
 }
@@ -288,6 +390,10 @@ export async function setupScene(
     switchToScene = false,
     layout = {},
     crop = null,
+    /** See placeSource: an explicitly requested crop beats a hand-set one. */
+    forceCrop = false,
+    /** See placeSource and crop-memory.js. */
+    cropMemory = null,
     /**
      * true: no frame arriving is a failure and triggers the fallback.
      * false: warn and leave the source in place -- on the LAST attempt, a
@@ -340,6 +446,8 @@ export async function setupScene(
       sceneName,
       inputName,
       crop,
+      forceCrop,
+      cropMemory,
       frameTimeoutMs: 15_000 + firstRunBonusMs,
       // Only auto-frame the source the first time it's created. If the
       // scene and the source both already existed, someone (a streamer,

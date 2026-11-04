@@ -1,12 +1,15 @@
 # obs-phonecast
 
-Stream your Android phone's screen into OBS, without notifications or the navigation bar.
-
-A clean, scene-ready panel that sets itself up in OBS.
+**Show an Android app on stream, in OBS, with no notifications and no navigation bar.**
+Not a webcam. Not a screen-recording hack. A clean, dedicated virtual display that OBS captures as a normal source.
 
 ```
 obs-phonecast --app youtube
 ```
+
+Built on [scrcpy](https://github.com/Genymobile/scrcpy)'s virtual display and obs-websocket. Works on Windows, macOS and Linux, over USB or Wi-Fi.
+
+> Looking for your phone's **camera** as a webcam (DroidCam, Iriun, scrcpy `--video-source=camera`)? That's a different problem. obs-phonecast is for showing your phone's **screen / apps**.
 
 ---
 
@@ -21,6 +24,16 @@ Mirroring a phone's screen into OBS is easy. Doing it **cleanly** is not:
 obs-phonecast uses scrcpy's **virtual display**: the phone creates a second display, invisible on its physical screen, where only the chosen application runs. Notifications stay on the phone's real screen and never reach the stream. There's no status bar and no nav bar, because they don't exist on that display.
 
 obs-phonecast then creates and configures the source in OBS for you, via obs-websocket.
+
+## How is this different from...
+
+| | What it does | Notifications on stream? | Sets up OBS for you? |
+|---|---|---|---|
+| Phone as webcam (DroidCam, Iriun...) | Streams the phone's **camera** | n/a | No |
+| Plain scrcpy + window capture | Mirrors the physical screen | **Yes**, plus status bar and nav bar | No |
+| [scrcpy-camera](https://github.com/NanKillBro/scrcpy-camera) (OBS plugin) | Captures the screen or camera through an OBS plugin | Depends on mode | Plugin |
+| **obs-phonecast** | Runs one app on a hidden virtual display | **No** | **Yes**: scene, source, position kept between sessions |
+
 
 ## Requirements
 
@@ -80,6 +93,34 @@ node src/index.js --app youtube      # start
 
 The "Phone" scene and "Phone Screen" source are created and positioned automatically. Ctrl+C to stop.
 
+Once the source exists, it's yours: obs-phonecast never moves or resizes it again, and a crop you set by hand in OBS is kept too. The only crop it manages is the one it applied itself in `--launcher` mode (to hide the status and navigation bars): it updates or clears that one on later runs, and leaves any other alone. To force a crop over yours, pass `--crop-top` / `--crop-bottom`. What it applied last is remembered in the cache folder (`obs-crop.json`); deleting that file is harmless.
+
+### Prefer not to use a terminal at all?
+
+`obs-phonecast --dock` starts a web panel instead (app picker, on-air-style start/stop, live log feed, settings) that you add in OBS via Docks → Custom Browser Docks. It opens your default browser automatically so you immediately see it's working. See [Usage](#usage) below for the rest of what it can do.
+
+To avoid typing that command at all, `launchers/obs-phonecast-autostart.lua` starts the dock automatically when OBS itself launches, and stops it when OBS closes. Add it once via OBS's own **Tools → Scripts → +**, nothing to install separately (OBS bundles Lua). Still requires `npm install -g obs-phonecast` first. See the file's own header comment for exact status and troubleshooting -- it's reasoned through and unit-tested in isolation, but not yet verified against a real OBS install.
+
+## The dock (`--dock`)
+
+```bash
+obs-phonecast --dock
+```
+
+Starts a local web panel: app picker, start/stop button, live log feed, and a settings form that reads and writes the same config file as `--init`. It opens in your default browser (`--no-open` to skip that) and prints its URL, `http://127.0.0.1:7412` by default (`--dock-port` to change the port).
+
+**Adding it to OBS:** Docks > Custom Browser Docks, give it a name, paste that URL, Apply. The dock then lives inside OBS next to your scenes. Leave the `obs-phonecast --dock` process running (or use the Lua launcher above).
+
+While a session starts the button reads "Starting..." and is disabled; it turns into "Stop" once the stream is up.
+
+**Security.** The dock can start and stop a live session and can read or overwrite your OBS WebSocket password. So:
+
+- it binds to `127.0.0.1` only, so nothing else on your network can reach it;
+- it refuses WebSocket connections from other web pages (Origin check) and from unexpected host names (Host check, against DNS rebinding);
+- the config file it writes is private to your user (`0600` on macOS/Linux).
+
+**`--dock-host <addr>`** binds to another address, to drive the dock from a phone or another PC on your LAN, for example `--dock-host 192.168.1.20` and then open `http://192.168.1.20:7412` there. `0.0.0.0` (all interfaces) works too; in that case only requests addressed by IP are accepted, not by name. This is an explicit opt-in and logs a warning: anyone who can reach that address can control your session and read your OBS password, so only do it on a network you trust. There is no authentication.
+
 ## Usage
 
 ```bash
@@ -100,6 +141,8 @@ obs-phonecast --app youtube --control
 ```
 
 `--help` lists every option.
+
+**Control.** `--app` and `--launcher` turn mouse/keyboard control on automatically: scrcpy cannot start an app, or let you use a launcher, with control disabled. Without either you get a read-only mirror. `--control` forces it on explicitly.
 
 ### Configuration file
 
@@ -175,7 +218,7 @@ Priority: command-line arguments, then environment variables, then this file, th
 ## Development
 
 ```bash
-npm test          # 114 tests, no hardware required
+npm test          # 202 tests in 16 files, no hardware required (2 are skipped on Windows)
 npm start -- --app youtube
 ```
 
@@ -185,8 +228,13 @@ npm start -- --app youtube
 obs-phonecast/
 ├── src/
 │   ├── index.js            CLI: parses arguments, builds the logger
-│   ├── orchestrator.js     the full sequence and the mirror-mode fallback
+│   ├── orchestrator.js     the full sequence, mirror-mode fallback, watchdog
 │   ├── config.js           merges CLI > environment > file > defaults
+│   ├── settings.js         raw read/write of the config file (0600, atomic), validation
+│   ├── init.js             --init: interactive first-run setup
+│   ├── prompt.js           readline wrapper used by --init (TTY and piped)
+│   ├── errors.js           PhonecastError + codes: user-facing error vs bug
+│   ├── fatal.js            uncaughtException / unhandledRejection handlers
 │   ├── logger.js           levels + replaceable sink
 │   ├── paths.js            config and cache locations, per OS
 │   │
@@ -198,14 +246,26 @@ obs-phonecast/
 │   │   ├── app-list.js     PURE: app-name parsing and resolution
 │   │   ├── apps.js         calls --list-apps + disk cache
 │   │   ├── binary.js       locating scrcpy and adb
-│   │   └── process.js      spawn, monitoring, clean shutdown per OS
+│   │   └── process.js      spawn, monitoring, clean shutdown, Ctrl+C cleanup
 │   │
-│   └── obs/
-│       ├── client.js       websocket connection
-│       ├── scene.js        the 7 steps of scene creation
-│       └── platform.js     inputKind and settings per OS
+│   ├── obs/
+│   │   ├── client.js       websocket connection
+│   │   ├── scene.js        the 7 steps of scene creation
+│   │   ├── crop-memory.js  remembers the crop we applied (ours vs set by hand)
+│   │   └── platform.js     inputKind and settings per OS
+│   │
+│   └── server/             the dock's backend (--dock)
+│       ├── index.js        HTTP + WebSocket server, Origin/Host checks
+│       └── bridge.js       dock <-> orchestrator: one session, start/stop state
 │
-└── test/                   7 files, no hardware required
+├── web/
+│   └── index.html          the dock's single-page UI
+├── launchers/
+│   └── obs-phonecast-autostart.lua   OBS script that starts the dock with OBS
+├── scripts/
+│   ├── embed-dock.js       embeds web/index.html for compiled binaries
+│   └── diag-spawn.js       isolated scrcpy spawn repro (debugging aid)
+└── test/                   16 files, no hardware required
 ```
 
 ### Three rules to follow if you contribute

@@ -55,8 +55,11 @@ test('start flips status to running and broadcasts it', async () => {
 
   assert.equal(bridge.status(), 'running');
   assert.deepEqual(
-    messages.find((m) => m.type === 'status'),
-    { type: 'status', state: 'running', mode: 'virtual' },
+    messages.filter((m) => m.type === 'status'),
+    [
+      { type: 'status', state: 'starting' },
+      { type: 'status', state: 'running', mode: 'virtual' },
+    ],
   );
 });
 
@@ -87,8 +90,8 @@ test('stop flips status back to idle and broadcasts the reason', async () => {
 
   assert.equal(bridge.status(), 'idle');
   const statusMessages = messages.filter((m) => m.type === 'status');
-  assert.equal(statusMessages.length, 2); // running, then idle
-  assert.deepEqual(statusMessages[1], { type: 'status', state: 'idle', reason: 'stopped' });
+  assert.equal(statusMessages.length, 3); // starting, running, then idle
+  assert.deepEqual(statusMessages[2], { type: 'status', state: 'idle', reason: 'stopped' });
 });
 
 test('a new dock client gets replayed the log history', async () => {
@@ -114,6 +117,42 @@ test('listApps forwards through the injected adb/scrcpy layer', async () => {
 
   assert.equal(result.apps.length, 1);
   assert.equal(result.apps[0].name, 'YouTube');
+});
+
+test('start({ audio: true }) reaches startSession as audio.enabled: true', async () => {
+  // Locks in the whole chain: dock checkbox -> WebSocket message ->
+  // bridge.start -> config override -> the config startSession actually
+  // receives. Easy to break silently at any one of those hops (as
+  // keepActive already did once, in buildAttempts).
+  let receivedConfig = null;
+  const deps = fakeOrchestratorDeps({
+    startSessionImpl: async (config) => {
+      receivedConfig = config;
+      return { mode: 'virtual', stop: async () => {} };
+    },
+  });
+  const { broadcast } = collector();
+  const bridge = createBridge({ broadcast, deps });
+
+  await bridge.start({ audio: true });
+
+  assert.equal(receivedConfig.audio.enabled, true);
+});
+
+test('start() with no audio option leaves audio at its default (disabled)', async () => {
+  let receivedConfig = null;
+  const deps = fakeOrchestratorDeps({
+    startSessionImpl: async (config) => {
+      receivedConfig = config;
+      return { mode: 'virtual', stop: async () => {} };
+    },
+  });
+  const { broadcast } = collector();
+  const bridge = createBridge({ broadcast, deps });
+
+  await bridge.start({});
+
+  assert.equal(receivedConfig.audio.enabled, false);
 });
 
 test('a failed start leaves the bridge idle, not stuck', async () => {
@@ -176,4 +215,244 @@ test('saveConfig writes to the same path getConfig reads from', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+/* --- starting state: concurrency and cancellation --------------------------- */
+
+/** startSession that stays pending until release() is called. */
+function slowStart() {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const calls = [];
+  let stopped = 0;
+  let resolveWatch;
+  const watchPromise = new Promise((r) => {
+    resolveWatch = r;
+  });
+  const session = {
+    mode: 'virtual',
+    stop: async () => {
+      stopped += 1;
+      resolveWatch({ reason: 'stopped' });
+    },
+  };
+  const deps = {
+    ...fakeOrchestratorDeps(),
+    loadOrchestrator: async () => ({
+      startSession: async () => {
+        calls.push(1);
+        await gate;
+        return session;
+      },
+      watchSession: async () => watchPromise,
+    }),
+  };
+  return { deps, release, calls, stoppedCount: () => stopped };
+}
+
+test('two concurrent start() calls launch exactly one session', async () => {
+  const { broadcast } = collector();
+  const slow = slowStart();
+  const bridge = createBridge({ broadcast, deps: slow.deps });
+
+  const first = bridge.start({});
+  assert.equal(bridge.status(), 'starting');
+  await assert.rejects(() => bridge.start({}), /already running/);
+
+  slow.release();
+  await first;
+
+  assert.equal(slow.calls.length, 1);
+  assert.equal(bridge.status(), 'running');
+});
+
+test('stop() during startup stops the session as soon as it is up', async () => {
+  const { broadcast, messages } = collector();
+  const slow = slowStart();
+  const bridge = createBridge({ broadcast, deps: slow.deps });
+
+  const starting = bridge.start({});
+  const stopping = bridge.stop();
+  slow.release();
+  await Promise.all([starting, stopping]);
+
+  assert.equal(slow.stoppedCount(), 1);
+  assert.equal(bridge.status(), 'idle');
+  const states = messages.filter((m) => m.type === 'status').map((m) => m.state);
+  assert.deepEqual(states, ['starting', 'idle']);
+});
+
+test('a failed startSession returns the bridge to idle and can be retried', async () => {
+  const { broadcast, messages } = collector();
+  const deps = fakeOrchestratorDeps({
+    startSessionImpl: async () => {
+      throw new Error('no device');
+    },
+  });
+  const bridge = createBridge({ broadcast, deps });
+
+  await assert.rejects(() => bridge.start({}), /no device/);
+
+  assert.equal(bridge.status(), 'idle');
+  assert.equal(messages.at(-1).state, 'idle');
+});
+
+test('a watchSession rejection resets the bridge to idle', async () => {
+  const { broadcast, messages } = collector();
+  const deps = {
+    ...fakeOrchestratorDeps(),
+    loadOrchestrator: async () => ({
+      startSession: async () => ({ mode: 'virtual', stop: async () => {} }),
+      watchSession: async () => {
+        throw new Error('watcher blew up');
+      },
+    }),
+  };
+  const bridge = createBridge({ broadcast, deps });
+
+  await bridge.start({});
+  // Let the rejection handler run.
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(bridge.status(), 'idle');
+  assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'error' });
+});
+
+test('a watcher that gives up releases the session (OBS, screen timeout) before going idle', async () => {
+  const { broadcast, messages } = collector();
+  let stops = 0;
+  let statusWhenStopRan = null;
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({
+          mode: 'virtual',
+          stop: async () => {
+            stops += 1;
+            statusWhenStopRan = bridge.status();
+          },
+        }),
+        watchSession: async () => ({ reason: 'gave-up', exitCode: 1, restarts: 5 }),
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(stops, 1, 'session.stop() must run once, to release what the session holds');
+  // Still 'running' while releasing: a new start must not race the cleanup.
+  assert.equal(statusWhenStopRan, 'running');
+  assert.equal(bridge.status(), 'idle');
+  assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'gave-up' });
+});
+
+test('a watcher that throws also releases the session', async () => {
+  const { broadcast } = collector();
+  let stops = 0;
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({ mode: 'virtual', stop: async () => { stops += 1; } }),
+        watchSession: async () => {
+          throw new Error('watcher blew up');
+        },
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(stops, 1);
+  assert.equal(bridge.status(), 'idle');
+});
+
+test('a failing cleanup after gave-up still returns the bridge to idle', async () => {
+  const { broadcast, messages } = collector();
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({
+          mode: 'virtual',
+          stop: async () => {
+            throw new Error('adb gone');
+          },
+        }),
+        watchSession: async () => ({ reason: 'gave-up', exitCode: 1, restarts: 5 }),
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(bridge.status(), 'idle');
+  assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'gave-up' });
+});
+
+test('a normal stop() does not run the session cleanup a second time', async () => {
+  const { broadcast } = collector();
+  let stops = 0;
+  let resolveWatch;
+  const watchPromise = new Promise((r) => {
+    resolveWatch = r;
+  });
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({
+          mode: 'virtual',
+          stop: async () => {
+            stops += 1;
+            resolveWatch({ reason: 'stopped', exitCode: 0, restarts: 0 });
+          },
+        }),
+        watchSession: async () => watchPromise,
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await bridge.stop();
+
+  assert.equal(stops, 1);
+  assert.equal(bridge.status(), 'idle');
+});
+
+test('saveConfig rejects an invalid config and leaves the file alone', async () => {
+  const { mkdtemp, rm, access } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const dir = await mkdtemp(path.join(tmpdir(), 'bridge-cfg-'));
+  const file = path.join(dir, 'obs-phonecast.json');
+  try {
+    const { broadcast } = collector();
+    const bridge = createBridge({ broadcast, deps: fakeOrchestratorDeps(), configFile: file });
+
+    await assert.rejects(() => bridge.saveConfig({ obs: { port: 'abc' } }), /obs\.port/);
+    await assert.rejects(() => access(file), /ENOENT/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the bridge logger honors the configured level (-q hides info)', () => {
+  const { broadcast, messages } = collector();
+  const bridge = createBridge({ broadcast, deps: fakeOrchestratorDeps(), logLevel: 'error' });
+
+  bridge.logger.info('chatty');
+  bridge.logger.error('important');
+
+  const logs = messages.filter((m) => m.type === 'log').map((m) => m.record.message);
+  assert.deepEqual(logs, ['important']);
 });

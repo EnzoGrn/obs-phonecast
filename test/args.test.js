@@ -186,9 +186,16 @@ test('with an app, --no-control is not sent', () => {
   assert.ok(!args.includes('--no-control'));
 });
 
-test('with no app, --no-control is kept', () => {
-  const args = buildArgs(cfg({ launcher: true, app: null }));
+test('plain mirror (no app, no launcher), --no-control is kept', () => {
+  // Virtual mode refuses to start without an app or a launcher, so the
+  // read-only case only exists in mirror mode.
+  const args = buildArgs(cfg({ mode: Mode.MIRROR, launcher: false, app: null }));
   assert.ok(args.includes('--no-control'));
+});
+
+test('--launcher without --app keeps control on: the launcher would be unusable otherwise', () => {
+  const args = buildArgs(cfg({ launcher: true, app: null }));
+  assert.ok(!args.includes('--no-control'));
 });
 
 test('control explicitly enabled: no --no-control either', () => {
@@ -211,4 +218,25 @@ test('keep-active is enabled by default', () => {
 test('keep-active can be explicitly disabled', () => {
   const args = buildArgs(cfg({ app: 'com.example.app', keepActive: false }));
   assert.ok(!args.includes('--keep-active'));
+});
+
+/* --- resolveDecorationCrop: partial overrides keep the derived sides -------- */
+
+test('--crop-top alone keeps the DPI-derived bottom crop', async () => {
+  const { resolveDecorationCrop, deriveDecorationCrop } = await import('../src/scrcpy/args.js');
+  const derived = deriveDecorationCrop({ dpi: 420 });
+  const crop = resolveDecorationCrop({ top: 80 }, { dpi: 420 });
+  assert.equal(crop.top, 80);
+  assert.equal(crop.bottom, derived.bottom);
+  assert.ok(crop.bottom > 0);
+});
+
+test('a missing decorationCrop resolves entirely from the DPI', async () => {
+  const { resolveDecorationCrop, deriveDecorationCrop } = await import('../src/scrcpy/args.js');
+  assert.deepEqual(resolveDecorationCrop(null, { dpi: 320 }), deriveDecorationCrop({ dpi: 320 }));
+});
+
+test('an explicit 0 is respected (not treated as "missing")', async () => {
+  const { resolveDecorationCrop } = await import('../src/scrcpy/args.js');
+  assert.equal(resolveDecorationCrop({ bottom: 0 }, { dpi: 420 }).bottom, 0);
 });

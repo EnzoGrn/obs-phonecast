@@ -15,7 +15,7 @@
 
 import { silentLogger, createLogger, createBufferSink, combineSinks } from '../logger.js';
 import { loadConfig } from '../config.js';
-import { readRawConfig, writeRawConfig } from '../settings.js';
+import { readRawConfig, writeRawConfig, validateRawConfig } from '../settings.js';
 
 const defaultDeps = {
   async loadOrchestrator() {
@@ -38,12 +38,21 @@ const defaultDeps = {
  *   JSON-serializable message to every connected dock client
  * @param {object} options.deps  override for the lazy module loaders above
  *   (tests only)
+ * @param {string} options.logLevel  logger threshold (-v / -q from the CLI)
  * @param {string|null} options.configFile  override for the config file
  *   path (tests only); defaults to the real configPath()
  */
-export function createBridge({ broadcast, deps = defaultDeps, configFile = null } = {}) {
+export function createBridge({
+  broadcast,
+  deps = defaultDeps,
+  configFile = null,
+  logLevel = 'info',
+} = {}) {
   let session = null;
   let watching = null; // the in-flight watchSession() promise, if any
+  let state = 'idle'; // 'idle' | 'starting' | 'running'
+  let starting = null; // the in-flight start, so stop() can wait for it
+  let cancelRequested = false;
 
   // Kept so a dock that connects AFTER the session already started still
   // sees everything that happened so far -- this is exactly what
@@ -51,41 +60,111 @@ export function createBridge({ broadcast, deps = defaultDeps, configFile = null 
   const history = createBufferSink({ max: 300 });
 
   const logger = createLogger({
-    level: 'info',
+    level: logLevel,
     sink: combineSinks(history, (record) => broadcast({ type: 'log', record })),
   });
 
   function status() {
-    return session ? 'running' : 'idle';
+    return state;
   }
 
-  async function start({ app = null, launcher = false } = {}) {
-    if (session) {
+  function startSessionNow(options) {
+    const { app = null, launcher = false, audio = false } = options;
+    return (async () => {
+      const overrides = {};
+      if (app) overrides.app = app;
+      if (launcher) overrides.launcher = true;
+      if (audio) overrides.audio = { enabled: true };
+      const config = await loadConfig(overrides);
+
+      const { startSession, watchSession } = await deps.loadOrchestrator();
+
+      const started = await startSession(config, { logger });
+
+      // A stop() that arrived while we were still starting: the session
+      // exists now, so shut it straight down rather than going live.
+      if (cancelRequested) {
+        await started.stop();
+        state = 'idle';
+        broadcast({ type: 'status', state, reason: 'stopped' });
+        return;
+      }
+
+      session = started;
+      state = 'running';
+      broadcast({ type: 'status', state, mode: session.mode });
+
+      const finish = async (reason) => {
+        // The watcher can end on its own: it gave up after too many
+        // restarts, or it threw. Nobody called stop() in that case, so the
+        // session still holds the OBS connection, a screen-off timeout it
+        // may have extended, and its entry in the cleanup registry. The CLI
+        // gets this for free (index.js calls session.stop() once the
+        // watcher returns); the dock has to do it itself. stop() is
+        // idempotent. A 'stopped' end already went through stop().
+        if (reason !== 'stopped') {
+          try {
+            await started.stop();
+          } catch (err) {
+            logger.warn(`Cleanup after the session ended failed: ${err?.message ?? err}`);
+          }
+        }
+        // Only now go idle: until the cleanup is done, a new start would
+        // race the connection and timeout it is still releasing.
+        session = null;
+        watching = null;
+        state = 'idle';
+        broadcast({ type: 'status', state, reason });
+      };
+
+      // Not awaited here on purpose: watchSession blocks until the session
+      // ends, and start() must return as soon as the session is UP, not
+      // once it's over. Its eventual resolution is what flips the state
+      // back to idle and tells connected docks the run has ended.
+      watching = watchSession(started, { logger }).then(
+        (result) => finish(result.reason),
+        (err) => {
+          logger.error(`Session watcher failed: ${err?.message ?? err}`);
+          return finish('error');
+        },
+      );
+    })();
+  }
+
+  async function start(options = {}) {
+    // Checked and set synchronously, before the first await: two docks (or
+    // a double click) racing here must not both get through.
+    if (state !== 'idle') {
       throw new Error('A session is already running. Stop it before starting another.');
     }
+    state = 'starting';
+    cancelRequested = false;
+    broadcast({ type: 'status', state });
 
-    const overrides = {};
-    if (app) overrides.app = app;
-    if (launcher) overrides.launcher = true;
-    const config = await loadConfig(overrides);
-
-    const { startSession, watchSession } = await deps.loadOrchestrator();
-
-    session = await startSession(config, { logger });
-    broadcast({ type: 'status', state: status(), mode: session.mode });
-
-    // Not awaited here on purpose: watchSession blocks until the session
-    // ends, and start() must return as soon as the session is UP, not
-    // once it's over. Its eventual resolution is what flips `session`
-    // back to null and tells connected docks the run has ended.
-    watching = watchSession(session, { logger }).then((result) => {
-      session = null;
-      watching = null;
-      broadcast({ type: 'status', state: status(), reason: result.reason });
-    });
+    starting = startSessionNow(options);
+    try {
+      await starting;
+    } catch (err) {
+      state = 'idle';
+      broadcast({ type: 'status', state });
+      throw err;
+    } finally {
+      starting = null;
+    }
   }
 
   async function stop() {
+    if (state === 'starting') {
+      cancelRequested = true;
+      // start() unwinds on its own (and broadcasts idle); wait for it so the
+      // caller sees a settled bridge.
+      try {
+        await starting;
+      } catch {
+        /* the failed start already reported its own error */
+      }
+      return;
+    }
     if (!session) return;
     await session.stop();
     // watchSession's own loop observes the expected exit and resolves on
@@ -129,6 +208,7 @@ export function createBridge({ broadcast, deps = defaultDeps, configFile = null 
    * untouched rather than being silently dropped.
    */
   async function saveConfig(config) {
+    validateRawConfig(config);
     return writeRawConfig(config, configFile);
   }
 

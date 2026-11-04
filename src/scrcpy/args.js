@@ -88,6 +88,16 @@ export const defaultConfig = Object.freeze({
    */
   keepActive: true,
 
+  /**
+   * Removes the scrcpy client window's OS title bar and borders on the
+   * PC side. Off by default: OBS's window capture already crops to just
+   * the client area (`client_area: true` in obs/platform.js), so a
+   * decorated window doesn't leak into the captured frame -- keeping the
+   * normal title bar just gives you a real window you can move, minimize,
+   * or close by hand, without affecting what viewers see.
+   */
+  windowBorderless: false,
+
   /** Path like /dev/video2. Linux only, bypasses the window entirely. */
   v4l2Sink: null,
 });
@@ -102,7 +112,7 @@ export class ConfigError extends PhonecastError {
   }
 }
 
-const BITRATE_RE = /^\d+(\.\d+)?[KM]?$/;
+export const BITRATE_RE = /^\d+(\.\d+)?[KM]?$/;
 
 /**
  * Validates the config and throws an explicit ConfigError.
@@ -228,6 +238,23 @@ export function deriveDecorationCrop({ dpi, statusBarDp = 24, navBarDp = 48 }) {
   return { top: toPx(statusBarDp), bottom: toPx(navBarDp), left: 0, right: 0 };
 }
 
+/**
+ * Completes a possibly-partial crop (from --crop-top, or a hand-edited
+ * config file) with the DPI-derived value for every side it leaves out.
+ * `--crop-top 80` alone must not zero the bottom bar: a missing side keeps
+ * the computed crop. null/undefined means "all derived".
+ */
+export function resolveDecorationCrop(partial, { dpi }) {
+  const derived = deriveDecorationCrop({ dpi });
+  if (!partial) return derived;
+  const out = { ...derived };
+  for (const side of ['top', 'bottom', 'left', 'right']) {
+    const v = partial[side];
+    if (v !== undefined && v !== null) out[side] = v;
+  }
+  return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Building                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -285,7 +312,7 @@ export function buildArgs(config) {
     args.push('--no-window');
   } else {
     args.push(`--window-title=${WINDOW_TITLE}`);
-    args.push('--window-borderless');
+    if (config.windowBorderless) args.push('--window-borderless');
   }
 
   // --- Misc --------------------------------------------------------------------
@@ -294,7 +321,12 @@ export function buildArgs(config) {
   // control channel. So the two can't be combined. Control is enabled
   // implicitly rather than failing: with no app, we keep --no-control, which
   // avoids accidental clicks.
-  if (!config.control.enabled && !config.app) args.push('--no-control');
+  //
+  // --launcher counts as well: its whole point is to drive the phone's home
+  // screen from the PC, which is impossible with --no-control. So both
+  // --app and --launcher enable control implicitly (documented in --help
+  // and the README); only a plain mirror/virtual session stays read-only.
+  if (!config.control.enabled && !config.app && !config.launcher) args.push('--no-control');
   args.push('--disable-screensaver');
   if (config.turnScreenOff) args.push('--turn-screen-off');
   if (config.stayAwake) args.push('--stay-awake');
