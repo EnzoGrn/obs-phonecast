@@ -8,12 +8,23 @@ on:
       scrcpy_version:
         description: "scrcpy version to bundle into the Windows archive"
         default: '4.0'
+      scrcpy_sha256:
+        description: "SHA256 of scrcpy-win64-v<version>.zip (must match the version above)"
+        default: '75dbeb5b00e6f64292f26f70900ae55ca397786bdfb0b9bbeb481a0549047457'
 
 env:
   # scrcpy version bundled into the Windows archive.
   # Bumped by hand on purpose: automatically bundling "the latest version"
   # would make a reproducible release depend on a third-party repo.
   SCRCPY_VERSION: ${{ github.event.inputs.scrcpy_version || '4.0' }}
+  # Pinned next to the version: the zip is downloaded over the network and
+  # ends up redistributed in our release, so it must be the exact file we
+  # reviewed. Bump both together (the digest is on the scrcpy release page).
+  SCRCPY_SHA256: ${{ github.event.inputs.scrcpy_sha256 || '75dbeb5b00e6f64292f26f70900ae55ca397786bdfb0b9bbeb481a0549047457' }}
+
+# Read-only by default; only the job that publishes the release asks for more.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -39,21 +50,31 @@ jobs:
             ext: ''
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
 
-      - run: bun install --frozen-lockfile
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # The repo's lockfile is package-lock.json (npm), not bun.lock:
+      # `bun install --frozen-lockfile` has nothing to freeze against. npm ci
+      # installs exactly what the lockfile says; bun then only bundles.
+      - run: npm ci
 
       - name: Compile
         run: |
+          # Embeds web/index.html: a compiled binary has no web/ on disk.
+          node scripts/embed-dock.js
           mkdir -p dist
           bun build --compile \
             --target=${{ matrix.target }} \
             ./src/index.js \
             --outfile dist/obs-phonecast${{ matrix.ext }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: obs-phonecast-${{ matrix.name }}
           path: dist/obs-phonecast${{ matrix.ext }}
@@ -62,11 +83,13 @@ jobs:
   package:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release and upload its assets
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
 
@@ -110,7 +133,7 @@ jobs:
           (cd release && sha256sum * > SHA256SUMS.txt)
           ls -la release
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: release/*
