@@ -15,7 +15,7 @@
 
 import { silentLogger, createLogger, createBufferSink, combineSinks } from '../logger.js';
 import { loadConfig } from '../config.js';
-import { readRawConfig, writeRawConfig } from '../settings.js';
+import { readRawConfig, writeRawConfig, validateRawConfig } from '../settings.js';
 
 const defaultDeps = {
   async loadOrchestrator() {
@@ -186,6 +186,7 @@ export function createBridge({ broadcast, deps = defaultDeps, configFile = null 
    * untouched rather than being silently dropped.
    */
   async function saveConfig(config) {
+    validateRawConfig(config);
     return writeRawConfig(config, configFile);
   }
 

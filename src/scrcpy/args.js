@@ -112,7 +112,7 @@ export class ConfigError extends PhonecastError {
   }
 }
 
-const BITRATE_RE = /^\d+(\.\d+)?[KM]?$/;
+export const BITRATE_RE = /^\d+(\.\d+)?[KM]?$/;
 
 /**
  * Validates the config and throws an explicit ConfigError.

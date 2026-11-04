@@ -318,3 +318,20 @@ test('a watchSession rejection resets the bridge to idle', async () => {
   assert.equal(bridge.status(), 'idle');
   assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'error' });
 });
+
+test('saveConfig rejects an invalid config and leaves the file alone', async () => {
+  const { mkdtemp, rm, access } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const dir = await mkdtemp(path.join(tmpdir(), 'bridge-cfg-'));
+  const file = path.join(dir, 'obs-phonecast.json');
+  try {
+    const { broadcast } = collector();
+    const bridge = createBridge({ broadcast, deps: fakeOrchestratorDeps(), configFile: file });
+
+    await assert.rejects(() => bridge.saveConfig({ obs: { port: 'abc' } }), /obs\.port/);
+    await assert.rejects(() => access(file), /ENOENT/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

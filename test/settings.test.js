@@ -60,3 +60,82 @@ test('a read/write round trip preserves fields the caller never touched', async 
     assert.equal(final.obs.password, 'secret');
   });
 });
+
+/* --- permissions, atomicity, validation -------------------------------------- */
+
+import { stat, readdir } from 'node:fs/promises';
+import { validateRawConfig } from '../src/settings.js';
+
+const posix = process.platform !== 'win32';
+
+test('the config file is created 0600 (it holds the OBS password)', { skip: !posix }, async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, 'sub', 'obs-phonecast.json');
+    await writeRawConfig({ obs: { password: 'secret' } }, target);
+    assert.equal((await stat(target)).mode & 0o777, 0o600);
+    assert.equal((await stat(path.dirname(target))).mode & 0o777, 0o700);
+  });
+});
+
+test('overwriting a world-readable config tightens it to 0600', { skip: !posix }, async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, 'obs-phonecast.json');
+    await writeFile(target, '{}', { mode: 0o644 });
+    await writeRawConfig({ a: 1 }, target);
+    assert.equal((await stat(target)).mode & 0o777, 0o600);
+  });
+});
+
+test('the write is atomic: no temp file is left behind, content is complete', async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, 'obs-phonecast.json');
+    await writeRawConfig({ a: 1 }, target);
+    await writeRawConfig({ a: 2 }, target);
+    assert.deepEqual(await readdir(dir), ['obs-phonecast.json']);
+    assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), { a: 2 });
+  });
+});
+
+test('a failed write leaves the previous file intact and no temp file', async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, 'obs-phonecast.json');
+    await writeRawConfig({ keep: true }, target);
+    // A circular structure makes JSON.stringify throw before anything is written.
+    const circular = {};
+    circular.self = circular;
+    await assert.rejects(() => writeRawConfig(circular, target));
+    assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), { keep: true });
+    assert.deepEqual(await readdir(dir), ['obs-phonecast.json']);
+  });
+});
+
+test('validateRawConfig accepts a plain, partial, or unknown-keyed config', () => {
+  assert.doesNotThrow(() => validateRawConfig({}));
+  assert.doesNotThrow(() =>
+    validateRawConfig({
+      obs: { port: 4455 },
+      display: { dpi: 420 },
+      video: { bitrate: '8M' },
+      extra: 1,
+    }),
+  );
+});
+
+test('validateRawConfig rejects bad shapes and values', () => {
+  for (const bad of [
+    null,
+    [],
+    'x',
+    { obs: [] },
+    { obs: { port: '4455' } },
+    { obs: { port: 0 } },
+    { obs: { port: 70000 } },
+    { obs: { port: 4455.5 } },
+    { display: { dpi: 'high' } },
+    { display: { dpi: -1 } },
+    { video: { bitrate: 'fast' } },
+    { video: { bitrate: '8MB' } },
+  ]) {
+    assert.throws(() => validateRawConfig(bad), /Invalid config/, JSON.stringify(bad));
+  }
+});
