@@ -38,7 +38,28 @@ import { silentLogger } from './logger.js';
 
 export async function startSession(config, { logger = silentLogger } = {}) {
   const active = { proc: null };
-  registerCleanup(() => [active.proc]);
+  // What a Ctrl+C (or a failed start) must be able to put back: the phone's
+  // screen-off timeout and the OBS connection. Filled in as startSessionImpl
+  // makes each change.
+  const undo = { restoreTimeout: null, obs: null };
+  const runUndo = async () => {
+    await undo.restoreTimeout?.();
+    if (undo.obs) await disconnectObs(undo.obs);
+  };
+  const unregister = registerCleanup(() => [active.proc], { hook: runUndo });
+
+  try {
+    return await startSessionImpl(config, { logger, active, undo, runUndo, unregister });
+  } catch (err) {
+    // A failed start leaves nothing running, but may have extended the
+    // screen timeout before failing.
+    await runUndo().catch(() => {});
+    unregister();
+    throw err;
+  }
+}
+
+async function startSessionImpl(config, { logger, active, undo, runUndo, unregister }) {
 
   // --- 1. Binaries --------------------------------------------------------
   const binaries = await resolveBinaries();
@@ -75,6 +96,16 @@ export async function startSession(config, { logger = silentLogger } = {}) {
       originalScreenTimeout = await getScreenOffTimeout(binaries, device.serial);
       if (originalScreenTimeout != null) {
         await setScreenOffTimeout(binaries, device.serial, config.screenTimeoutMs);
+        let restored = false;
+        undo.restoreTimeout = async () => {
+          if (restored) return;
+          restored = true;
+          // Must never make shutdown fail: better to leave the extended
+          // timeout in place than to crash session teardown over it.
+          await setScreenOffTimeout(binaries, device.serial, originalScreenTimeout).catch(
+            (err) => logger.warn(`Failed to restore screen-off timeout: ${err.message}`),
+          );
+        };
         logger.info(
           `Screen-off timeout extended to ${Math.round(config.screenTimeoutMs / 60000)} min ` +
             `(restored on exit).`,
@@ -125,6 +156,7 @@ export async function startSession(config, { logger = silentLogger } = {}) {
 
   // --- 4. OBS ---------------------------------------------------------------
   const { obs, obsWebSocketVersion } = await connectObs({ ...config.obs, logger });
+  undo.obs = obs;
   logger.info(`OBS connected (websocket ${obsWebSocketVersion})`);
 
   // Wayland doesn't allow selecting the window programmatically. Better to
@@ -221,14 +253,8 @@ export async function startSession(config, { logger = silentLogger } = {}) {
           // this.proc, not proc: after a restart, the current process is
           // no longer the one captured when the session was created.
           await this.proc.stop();
-          if (originalScreenTimeout != null) {
-            // Must never make shutdown fail: better to leave the extended
-            // timeout in place than to crash session teardown over it.
-            await setScreenOffTimeout(binaries, device.serial, originalScreenTimeout).catch(
-              (err) => logger.warn(`Failed to restore screen-off timeout: ${err.message}`),
-            );
-          }
-          await disconnectObs(obs);
+          await runUndo(); // restores the screen timeout, disconnects OBS
+          unregister();
         },
       };
     } catch (err) {
