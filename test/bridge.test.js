@@ -116,6 +116,42 @@ test('listApps forwards through the injected adb/scrcpy layer', async () => {
   assert.equal(result.apps[0].name, 'YouTube');
 });
 
+test('start({ audio: true }) reaches startSession as audio.enabled: true', async () => {
+  // Locks in the whole chain: dock checkbox -> WebSocket message ->
+  // bridge.start -> config override -> the config startSession actually
+  // receives. Easy to break silently at any one of those hops (as
+  // keepActive already did once, in buildAttempts).
+  let receivedConfig = null;
+  const deps = fakeOrchestratorDeps({
+    startSessionImpl: async (config) => {
+      receivedConfig = config;
+      return { mode: 'virtual', stop: async () => {} };
+    },
+  });
+  const { broadcast } = collector();
+  const bridge = createBridge({ broadcast, deps });
+
+  await bridge.start({ audio: true });
+
+  assert.equal(receivedConfig.audio.enabled, true);
+});
+
+test('start() with no audio option leaves audio at its default (disabled)', async () => {
+  let receivedConfig = null;
+  const deps = fakeOrchestratorDeps({
+    startSessionImpl: async (config) => {
+      receivedConfig = config;
+      return { mode: 'virtual', stop: async () => {} };
+    },
+  });
+  const { broadcast } = collector();
+  const bridge = createBridge({ broadcast, deps });
+
+  await bridge.start({});
+
+  assert.equal(receivedConfig.audio.enabled, false);
+});
+
 test('a failed start leaves the bridge idle, not stuck', async () => {
   const { broadcast, messages } = collector();
   const deps = fakeOrchestratorDeps({

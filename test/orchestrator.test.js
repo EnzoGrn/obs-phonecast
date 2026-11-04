@@ -32,6 +32,13 @@ test('keepActive flows through buildAttempts all the way to the final command', 
   assert.ok(!argsFor({ keepActive: false }).includes('--keep-active'));
 });
 
+test('windowBorderless flows through buildAttempts all the way to the final command', () => {
+  // Off by default: OBS's client_area capture already crops the title bar
+  // out, so a decorated window should be the normal case, not the exception.
+  assert.ok(!argsFor({ windowBorderless: false }).includes('--window-borderless'));
+  assert.ok(argsFor({ windowBorderless: true }).includes('--window-borderless'));
+});
+
 test('keepActive also flows through in mirror mode', () => {
   const args = argsFor({ keepActive: true }, { mode: Mode.MIRROR });
   assert.ok(args.includes('--keep-active'));

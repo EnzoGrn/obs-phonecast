@@ -88,6 +88,16 @@ export const defaultConfig = Object.freeze({
    */
   keepActive: true,
 
+  /**
+   * Removes the scrcpy client window's OS title bar and borders on the
+   * PC side. Off by default: OBS's window capture already crops to just
+   * the client area (`client_area: true` in obs/platform.js), so a
+   * decorated window doesn't leak into the captured frame -- keeping the
+   * normal title bar just gives you a real window you can move, minimize,
+   * or close by hand, without affecting what viewers see.
+   */
+  windowBorderless: false,
+
   /** Path like /dev/video2. Linux only, bypasses the window entirely. */
   v4l2Sink: null,
 });
@@ -285,7 +295,7 @@ export function buildArgs(config) {
     args.push('--no-window');
   } else {
     args.push(`--window-title=${WINDOW_TITLE}`);
-    args.push('--window-borderless');
+    if (config.windowBorderless) args.push('--window-borderless');
   }
 
   // --- Misc --------------------------------------------------------------------

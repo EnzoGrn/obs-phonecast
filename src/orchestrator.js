@@ -275,6 +275,7 @@ export function buildAttempts(config, probe) {
     // handled it, but this explicit list was silently dropping it. Check
     // this list whenever a new field is added to args.js.
     keepActive: config.keepActive,
+    windowBorderless: config.windowBorderless,
     v4l2Sink: config.v4l2Sink,
   };
 

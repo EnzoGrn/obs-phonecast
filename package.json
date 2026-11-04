@@ -1,9 +1,38 @@
 {
   "name": "obs-phonecast",
   "version": "0.1.0",
-  "description": "Stream an Android phone's screen into OBS, without notifications or the navigation bar.",
+  "description": "Stream an Android app or screen into OBS via scrcpy's virtual display: no notifications, no nav bar, no webcam trick. One-click OBS dock included.",
   "type": "module",
   "license": "MIT",
+  "author": "EnzoGrn",
+  "homepage": "https://github.com/EnzoGrn/obs-phonecast#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EnzoGrn/obs-phonecast.git"
+  },
+  "bugs": {
+    "url": "https://github.com/EnzoGrn/obs-phonecast/issues"
+  },
+  "keywords": [
+    "obs",
+    "obs-studio",
+    "obs-websocket",
+    "obs-dock",
+    "android",
+    "scrcpy",
+    "screen-capture",
+    "screen-mirroring",
+    "phone-screen",
+    "mobile-streaming",
+    "mobile-gaming",
+    "virtual-display",
+    "streamer",
+    "twitch",
+    "youtube",
+    "no-notifications",
+    "adb",
+    "cli"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -24,6 +53,7 @@
   "files": [
     "src",
     "web",
+    "launchers",
     "vendor",
     "README.md",
     "LICENSE"

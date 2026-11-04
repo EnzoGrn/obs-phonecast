@@ -14,6 +14,54 @@ Caveats:
 - only works if OBS runs on the same machine
 - exact file name and key still need confirming, not yet verified
 
+### No-terminal launch -- done, via an OBS script (not double-click launchers)
+`launchers/obs-phonecast-autostart.lua` starts `obs-phonecast --dock`
+automatically when OBS itself launches, and stops it when OBS closes.
+Added via OBS's own Tools → Scripts → +; Lua needs nothing extra
+installed, unlike the Python scripting path.
+
+**Per-OS double-click launcher scripts (`.bat`/`.command`/`.sh`/`.desktop`)
+were built first, then deliberately removed.** The real problem, found
+only after building them: distributing them meant asking a streamer to
+download and run a raw script file from a link -- exactly the shape of a
+phishing attack, and a reasonable person (or antivirus) should be
+suspicious of it regardless of how legitimate the actual file is. Trust,
+not effort, was the blocker, so more scripting wouldn't have fixed it.
+Also confirmed along the way: bundling them in the npm package's `files`
+doesn't help either, since a global npm install buries them inside npm's
+own module directory, not anywhere a streamer would look.
+
+The OBS script sidesteps the trust problem entirely: it's added through
+OBS's own Scripts menu, an interface already trusted, rather than a
+downloaded executable. It only wraps the already-published
+`obs-phonecast --dock` command, so no compilation or code signing is
+needed either.
+
+**Honest status**: reasoned through and verified as far as possible
+without a real OBS install --
+- Lua syntax validated with a real compiler (`luac`).
+- The script's own logic (`script_load`, `script_properties`,
+  `script_update`, the restart button, `script_unload`) exercised against
+  a hand-written fake of the `obslua` API, catching real runtime errors a
+  syntax check alone wouldn't (undefined calls, wrong arg counts).
+- The core background-process mechanism (spawn detached, capture the PID
+  via `io.popen` + `$!`, confirm it's alive, kill it, confirm it's gone)
+  verified for real on Linux, including through Lua's own `io.popen`, not
+  just reasoned about.
+
+Not verified: the Windows branch (PowerShell nested inside `io.popen`'s
+shell quoting -- exactly the kind of thing that looks right and isn't),
+and the whole thing loaded into an actual OBS instance. This project had
+no OBS install available while building it. If it fails, OBS's own
+"Script log" panel (Tools → Scripts) will show exactly where, since every
+meaningful step logs through `obs.script_log()`.
+
+The standalone compiled binary (`bun build --compile`, still scoped in
+"Before publishing" above) remains the more complete answer for someone
+with zero command-line exposure at all -- the OBS script still requires
+`npm install -g obs-phonecast` once, from a terminal, before OBS can find
+it on PATH.
+
 ### First-run wizard -- done
 Implemented as `--init` (`src/init.js`, `src/prompt.js`). Prompts for the OBS
 WebSocket password (masked, on a real TTY) and a default app, writes the

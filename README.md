@@ -1,12 +1,15 @@
 # obs-phonecast
 
-Stream your Android phone's screen into OBS, without notifications or the navigation bar.
-
-A clean, scene-ready panel that sets itself up in OBS.
+**Show an Android app on stream, in OBS, with no notifications and no navigation bar.**
+Not a webcam. Not a screen-recording hack. A clean, dedicated virtual display that OBS captures as a normal source.
 
 ```
 obs-phonecast --app youtube
 ```
+
+Built on [scrcpy](https://github.com/Genymobile/scrcpy)'s virtual display and obs-websocket. Works on Windows, macOS and Linux, over USB or Wi-Fi.
+
+> Looking for your phone's **camera** as a webcam (DroidCam, Iriun, scrcpy `--video-source=camera`)? That's a different problem. obs-phonecast is for showing your phone's **screen / apps**.
 
 ---
 
@@ -21,6 +24,16 @@ Mirroring a phone's screen into OBS is easy. Doing it **cleanly** is not:
 obs-phonecast uses scrcpy's **virtual display**: the phone creates a second display, invisible on its physical screen, where only the chosen application runs. Notifications stay on the phone's real screen and never reach the stream. There's no status bar and no nav bar, because they don't exist on that display.
 
 obs-phonecast then creates and configures the source in OBS for you, via obs-websocket.
+
+## How is this different from...
+
+| | What it does | Notifications on stream? | Sets up OBS for you? |
+|---|---|---|---|
+| Phone as webcam (DroidCam, Iriun...) | Streams the phone's **camera** | n/a | No |
+| Plain scrcpy + window capture | Mirrors the physical screen | **Yes**, plus status bar and nav bar | No |
+| [scrcpy-camera](https://github.com/NanKillBro/scrcpy-camera) (OBS plugin) | Captures the screen or camera through an OBS plugin | Depends on mode | Plugin |
+| **obs-phonecast** | Runs one app on a hidden virtual display | **No** | **Yes**: scene, source, position kept between sessions |
+
 
 ## Requirements
 
@@ -79,6 +92,12 @@ node src/index.js --app youtube      # start
 ```
 
 The "Phone" scene and "Phone Screen" source are created and positioned automatically. Ctrl+C to stop.
+
+### Prefer not to use a terminal at all?
+
+`obs-phonecast --dock` starts a web panel instead (app picker, on-air-style start/stop, live log feed, settings) that you add in OBS via Docks → Custom Browser Docks. It opens your default browser automatically so you immediately see it's working. See [Usage](#usage) below for the rest of what it can do.
+
+To avoid typing that command at all, `launchers/obs-phonecast-autostart.lua` starts the dock automatically when OBS itself launches, and stops it when OBS closes. Add it once via OBS's own **Tools → Scripts → +**, nothing to install separately (OBS bundles Lua). Still requires `npm install -g obs-phonecast` first. See the file's own header comment for exact status and troubleshooting -- it's reasoned through and unit-tested in isolation, but not yet verified against a real OBS install.
 
 ## Usage
 

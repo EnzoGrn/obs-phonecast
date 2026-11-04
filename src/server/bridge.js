@@ -59,7 +59,7 @@ export function createBridge({ broadcast, deps = defaultDeps, configFile = null 
     return session ? 'running' : 'idle';
   }
 
-  async function start({ app = null, launcher = false } = {}) {
+  async function start({ app = null, launcher = false, audio = false } = {}) {
     if (session) {
       throw new Error('A session is already running. Stop it before starting another.');
     }
@@ -67,6 +67,7 @@ export function createBridge({ broadcast, deps = defaultDeps, configFile = null 
     const overrides = {};
     if (app) overrides.app = app;
     if (launcher) overrides.launcher = true;
+    if (audio) overrides.audio = { enabled: true };
     const config = await loadConfig(overrides);
 
     const { startSession, watchSession } = await deps.loadOrchestrator();

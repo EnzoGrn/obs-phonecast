@@ -7,6 +7,7 @@
  */
 
 import { parseArgs } from 'node:util';
+import { exec } from 'node:child_process';
 
 import { loadConfig, configPath } from './config.js';
 import { Mode } from './scrcpy/args.js';
@@ -57,6 +58,7 @@ const options = {
   'no-fallback': { type: 'boolean' },
   'no-restart': { type: 'boolean' },
   'no-keep-active': { type: 'boolean' },
+  borderless: { type: 'boolean' },
   'extend-screen-timeout': { type: 'boolean' },
   'capture-method': { type: 'string' },
   launcher: { type: 'boolean', short: 'l' },
@@ -73,6 +75,7 @@ const options = {
   dock: { type: 'boolean' },
   'dock-port': { type: 'string' },
   'dock-host': { type: 'string' },
+  'no-open': { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 };
 
@@ -100,6 +103,10 @@ Setup
                        else exposes the panel -- and the ability to read
                        or overwrite your OBS password -- to that address's
                        reach; only do this on a network you trust.
+  --no-open            don't automatically open the dock URL in the
+                       default browser (it opens by default, so someone
+                       who isn't comfortable with a terminal still sees
+                       proof it's working without copying a URL by hand).
 
 Applications
   --list-apps          list the phone's applications, then exit
@@ -136,6 +143,11 @@ Capture
                        idle); note it did NOT, by itself, fix a separate
                        disconnect issue we investigated (see
                        --extend-screen-timeout below and ROADMAP.md).
+  --borderless         hide the scrcpy window's title bar and OS border
+                       on this PC. Off by default: OBS already captures
+                       just the video content regardless, so keeping the
+                       normal title bar gives you a real window you can
+                       move, minimize, or close by hand.
   --extend-screen-timeout  extends the physical screen's sleep timeout to
                        30 min for the session (restored on exit). OFF BY
                        DEFAULT: its premise (fixing a documented scrcpy
@@ -209,6 +221,7 @@ function buildOverrides(values) {
   if (values.serial) o.serial = values.serial;
   if (values['no-fallback']) o.noFallback = true;
   if (values['no-keep-active']) o.keepActive = false;
+  if (values.borderless) o.windowBorderless = true;
   if (values['extend-screen-timeout']) o.extendScreenTimeout = true;
   if (values['capture-method']) o.windowCaptureMethod = Number(values['capture-method']);
   if (values.launcher) o.launcher = true;
@@ -300,6 +313,30 @@ async function printApps(config, values, logger) {
   );
 }
 
+/**
+ * Best-effort: opens the system default browser at the given URL.
+ *
+ * Deliberately non-fatal on failure -- this runs on a headless server, or
+ * a machine with no browser configured, often enough that it must never
+ * take the dock down with it. Uses the OS's own "open a URL" command
+ * rather than a package, since it's a single fire-and-forget call and
+ * node:child_process is already built in.
+ */
+function openInBrowser(url, logger) {
+  const command =
+    process.platform === 'win32'
+      ? `start "" "${url}"`
+      : process.platform === 'darwin'
+        ? `open "${url}"`
+        : `xdg-open "${url}"`;
+
+  exec(command, (err) => {
+    if (err) {
+      logger.debug(`Could not auto-open a browser (${err.message}). Open the URL above by hand.`);
+    }
+  });
+}
+
 async function main() {
   const { values } = parseArgs({ options, allowPositionals: false });
 
@@ -326,6 +363,10 @@ async function main() {
     logger.info(`Dock ready at ${url}`);
     logger.info('In OBS: Docks menu > Custom Browser Docks, paste that URL, give it a name.');
     logger.info('Ctrl+C to stop.');
+
+    if (!values['no-open']) {
+      openInBrowser(url, logger);
+    }
 
     // Keep the process alive until interrupted; the HTTP server already
     // does this on its own, but an explicit handler lets us close cleanly
