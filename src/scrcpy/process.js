@@ -79,13 +79,13 @@ export class ScrcpyProcess extends EventEmitter {
       // multi-hour session, buffering would be a guaranteed leak.
       buffer: false,
       reject: false,
-      // Hides the child's console window on Windows (CREATE_NO_WINDOW).
-      // Investigated as a suspect during a hard-to-reproduce disconnect bug
-      // (real cause turned out to be OBS scene-creation timing on first
-      // run, see ROADMAP.md) and ruled out — reverted here to the safer
-      // default. Without it, a flashing console box is possible if
-      // obs-phonecast is ever launched without an already-visible console
-      // (e.g. packaged binary, future GUI dock).
+      // Hides the child's console window on Windows (CREATE_NO_WINDOW), so no
+      // empty console box flashes up when obs-phonecast itself runs without
+      // a visible console (packaged binary, OBS Lua launcher, dock). It was
+      // suspected once in a hard-to-reproduce disconnect bug (the real cause
+      // turned out to be OBS scene-creation timing on first run, see
+      // ROADMAP.md) and ruled out. scrcpy's own SDL window is unaffected:
+      // it is a GUI window, not the console.
       windowsHide: true,
       env: { ...process.env, ...this.env },
     });
