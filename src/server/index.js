@@ -53,6 +53,7 @@
  */
 
 import http from 'node:http';
+import { isIP } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -66,25 +67,78 @@ const DOCK_HTML_PATH = path.resolve(HERE, '../../web/index.html');
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
 
+const WILDCARD_HOSTS = new Set(['0.0.0.0', '::']);
+
+/** Lowercase hostname without IPv6 brackets, in URL's canonical spelling. */
+function normalizeHostname(hostname) {
+  const bare = String(hostname).replace(/^\[|\]$/g, '').toLowerCase();
+  if (!bare.includes(':')) return bare;
+  try {
+    return new URL(`http://[${bare}]`).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return bare;
+  }
+}
+
+/** { hostname, port } of an Origin or Host value, or null if unparseable. */
+function parseAuthority(value, { isOrigin }) {
+  try {
+    const url = new URL(isOrigin ? value : `http://${value}`);
+    const defaultPort = url.protocol === 'https:' ? '443' : '80';
+    return { hostname: normalizeHostname(url.hostname), port: url.port || defaultPort };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Pure, so it's directly testable: does this Origin header belong to a
- * page served by OUR server on this port?
+ * Pure, so it's directly testable: does this handshake belong to a page
+ * served by OUR server on this port?
+ *
+ * Two checks, both needed:
+ *  - Origin: stops a third-party webpage from opening the socket.
+ *  - Host: stops DNS rebinding. A rebinding page is same-origin with
+ *    itself (Origin evil.example:7412, Host evil.example:7412), so its
+ *    Origin alone looks consistent; only the Host name gives it away.
+ *
+ * Accepted hostnames: loopback, the exact --dock-host value, and -- when
+ * bound to a wildcard address (0.0.0.0 / ::), where the server cannot know
+ * its own name -- any IP literal, since a rebinding attack needs a DNS
+ * name. In the wildcard case the Origin must also match the Host header.
  *
  * @param {string|undefined} origin  the WebSocket handshake's Origin header
  * @param {number} port
+ * @param {object} [options]  omitted: loopback-only, no Host check
+ * @param {string|null} [options.host]  the --dock-host the server is bound to
+ * @param {string|null} [options.hostHeader]  the request's Host header
  */
-export function isAllowedOrigin(origin, port) {
+export function isAllowedOrigin(origin, port, { host = null, hostHeader = null } = {}) {
+  const wanted = String(port);
+  const wildcard = host !== null && WILDCARD_HOSTS.has(normalizeHostname(host));
+  const configured = host !== null && !wildcard ? normalizeHostname(host) : null;
+
+  const hostnameOk = (hostname) =>
+    LOOPBACK_HOSTNAMES.has(hostname) ||
+    hostname === configured ||
+    (wildcard && isIP(hostname) !== 0);
+
+  let hostAuthority = null;
+  if (hostHeader !== null && hostHeader !== undefined) {
+    hostAuthority = parseAuthority(hostHeader, { isOrigin: false });
+    if (!hostAuthority || hostAuthority.port !== wanted || !hostnameOk(hostAuthority.hostname)) {
+      return false;
+    }
+  }
+
   if (!origin) return true; // no Origin: not a browser context, see note above
-  try {
-    const url = new URL(origin);
-    // url.hostname brackets an IPv6 literal ("[::1]"); the raw --dock-host
-    // value and this parsed value use different conventions for the same
-    // address, so normalize rather than maintaining two loopback sets.
-    const hostname = url.hostname.replace(/^\[|\]$/g, '');
-    return LOOPBACK_HOSTNAMES.has(hostname) && url.port === String(port);
-  } catch {
+
+  const originAuthority = parseAuthority(origin, { isOrigin: true });
+  if (!originAuthority || originAuthority.port !== wanted) return false;
+  if (!hostnameOk(originAuthority.hostname)) return false;
+  if (wildcard && hostAuthority && originAuthority.hostname !== hostAuthority.hostname) {
     return false;
   }
+  return true;
 }
 
 /**
@@ -115,7 +169,7 @@ export async function startDockServer({ port = 7412, host = '127.0.0.1', logger 
   const wss = new WebSocketServer({
     server: httpServer,
     verifyClient: (info, callback) => {
-      callback(isAllowedOrigin(info.origin, port));
+      callback(isAllowedOrigin(info.origin, port, { host, hostHeader: info.req.headers.host }));
     },
   });
   const clients = new Set();
