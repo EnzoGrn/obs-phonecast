@@ -20,7 +20,7 @@
  * try, then fall back.
  */
 
-import { Mode, deriveCrop, deriveDecorationCrop, WINDOW_TITLE } from './scrcpy/args.js';
+import { Mode, deriveCrop, resolveDecorationCrop, WINDOW_TITLE } from './scrcpy/args.js';
 import { resolveBinaries } from './scrcpy/binary.js';
 import { launch, registerCleanup, ScrcpyLaunchError } from './scrcpy/process.js';
 import {
@@ -185,7 +185,7 @@ export async function startSession(config, { logger = silentLogger } = {}) {
         // decorations, there's nothing to remove.
         crop:
           attempt.mode === Mode.VIRTUAL && attempt.launcher
-            ? (config.decorationCrop ?? deriveDecorationCrop({ dpi: attempt.display.dpi }))
+            ? resolveDecorationCrop(config.decorationCrop, { dpi: attempt.display.dpi })
             : null,
         // On the last attempt there's no fallback left: a source that's in
         // place but poorly framed beats no source at all.

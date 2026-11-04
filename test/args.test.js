@@ -212,3 +212,24 @@ test('keep-active can be explicitly disabled', () => {
   const args = buildArgs(cfg({ app: 'com.example.app', keepActive: false }));
   assert.ok(!args.includes('--keep-active'));
 });
+
+/* --- resolveDecorationCrop: partial overrides keep the derived sides -------- */
+
+test('--crop-top alone keeps the DPI-derived bottom crop', async () => {
+  const { resolveDecorationCrop, deriveDecorationCrop } = await import('../src/scrcpy/args.js');
+  const derived = deriveDecorationCrop({ dpi: 420 });
+  const crop = resolveDecorationCrop({ top: 80 }, { dpi: 420 });
+  assert.equal(crop.top, 80);
+  assert.equal(crop.bottom, derived.bottom);
+  assert.ok(crop.bottom > 0);
+});
+
+test('a missing decorationCrop resolves entirely from the DPI', async () => {
+  const { resolveDecorationCrop, deriveDecorationCrop } = await import('../src/scrcpy/args.js');
+  assert.deepEqual(resolveDecorationCrop(null, { dpi: 320 }), deriveDecorationCrop({ dpi: 320 }));
+});
+
+test('an explicit 0 is respected (not treated as "missing")', async () => {
+  const { resolveDecorationCrop } = await import('../src/scrcpy/args.js');
+  assert.equal(resolveDecorationCrop({ bottom: 0 }, { dpi: 420 }).bottom, 0);
+});

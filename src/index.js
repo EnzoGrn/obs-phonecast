@@ -229,7 +229,7 @@ function buildOverrides(values) {
   const crop = {};
   if (values['crop-top']) crop.top = Number(values['crop-top']);
   if (values['crop-bottom']) crop.bottom = Number(values['crop-bottom']);
-  if (Object.keys(crop).length) o.decorationCrop = { left: 0, right: 0, ...crop };
+  if (Object.keys(crop).length) o.decorationCrop = crop;
   if (values.v4l2) o.v4l2Sink = values.v4l2;
 
   if (values.mode) {

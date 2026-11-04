@@ -238,6 +238,23 @@ export function deriveDecorationCrop({ dpi, statusBarDp = 24, navBarDp = 48 }) {
   return { top: toPx(statusBarDp), bottom: toPx(navBarDp), left: 0, right: 0 };
 }
 
+/**
+ * Completes a possibly-partial crop (from --crop-top, or a hand-edited
+ * config file) with the DPI-derived value for every side it leaves out.
+ * `--crop-top 80` alone must not zero the bottom bar: a missing side keeps
+ * the computed crop. null/undefined means "all derived".
+ */
+export function resolveDecorationCrop(partial, { dpi }) {
+  const derived = deriveDecorationCrop({ dpi });
+  if (!partial) return derived;
+  const out = { ...derived };
+  for (const side of ['top', 'bottom', 'left', 'right']) {
+    const v = partial[side];
+    if (v !== undefined && v !== null) out[side] = v;
+  }
+  return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Building                                                                   */
 /* -------------------------------------------------------------------------- */
