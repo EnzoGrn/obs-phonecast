@@ -135,6 +135,21 @@ that's a general OS-level boundary no local, unauthenticated tool fully
 closes. If that threat model matters to you, don't run the dock at all;
 use the CLI directly.
 
+**Hardening added after an audit** (all covered by tests):
+
+4. **Host header check, and `--dock-host` origins.** `isAllowedOrigin` also
+   rejects a `Host` header that is not loopback, the configured
+   `--dock-host`, or (on a wildcard bind) an IP literal. A DNS-rebinding
+   page is same-origin with itself, so its Origin alone looks fine; its
+   host *name* gives it away. A LAN origin equal to the configured host is
+   now accepted, which `--dock-host` needs in order to be usable at all.
+5. **`start` is serialized.** The bridge has an explicit `starting` state set
+   before the first `await`: two concurrent starts launch one session, and
+   a `stop` during startup cancels once the session exists.
+6. **The config file is `0600` in a `0700` folder and written atomically**
+   (temp file + rename), through one function shared by `--init` and the
+   dock. `saveConfig` validates `obs.port`, `display.dpi`, `video.bitrate`.
+
 Still open: changing the running app without restarting scrcpy (the
 `adb shell am start --display <id>` mechanism), and exposing more of the
 config surface in the settings panel than the five fields currently
@@ -187,7 +202,7 @@ run by hand with OBS capturing the same way, never showed this problem.
 
 3. **`windowsHide: true` in the execa spawn options.** Hypothesis: hiding
    the child's console window somehow affected the SDL window's behavior.
-   Reverted to `false` to test. Ruled out by a dedicated isolated repro
+   Temporarily set to `false` to test (it is `true` again in the code). Ruled out by a dedicated isolated repro
    script (`scripts/diag-spawn.js`) that spawns the exact same command via
    execa, with no orchestrator, no OBS, and no adb layer around it: it
    never disconnected, with `windowsHide` either way. This definitively
@@ -202,7 +217,9 @@ run by hand with OBS capturing the same way, never showed this problem.
    was cleaning up after a normal exit, with zero error output on the
    scrcpy side. This was a REAL bug, fixed by attaching a listener before
    the first connection attempt (see `src/obs/client.js`), plus a global
-   `uncaughtException` / `unhandledRejection` safety net in `index.js`.
+   `uncaughtException` / `unhandledRejection` safety net in `index.js`
+   (since changed: it now runs cleanup and exits non-zero instead of
+   carrying on, except for OBS websocket rejections; see `src/fatal.js`).
    However: fixing it did not, by itself, make the disconnects stop. It
    was a real bug worth fixing regardless, just not *the* explanation for
    this specific symptom.
@@ -260,9 +277,37 @@ fallback logic, not something external.
   occur; worth double-checking the equivalent SIGTERM path on Linux
   instead
 
+## Audit follow-up (fixed)
+
+From a full audit of the repo; each item has a commit and a test.
+
+- Launcher crop now re-synced when scene + source already exist (a partial
+  `SetSceneItemTransform` with only the crop fields; position and size stay
+  the user's).
+- Dock: `starting` state, no double start, `stop` during startup, watcher
+  failures reset to idle; `--dock-host` usable from another device.
+- Unknown CLI options and an unreadable config file are reported as user
+  errors (exit 1), not as bugs.
+- `--crop-top` alone keeps the DPI-derived bottom crop.
+- Ctrl+C / SIGTERM / fatal errors restore the phone's screen-off timeout and
+  disconnect OBS (5 s global timeout); one set of process listeners for the
+  whole program instead of one per session.
+- Watchdog: `stop()` during the restart delay no longer relaunches scrcpy;
+  a failed relaunch no longer logs the same crash twice.
+- Compiled binaries serve the dock (page embedded by
+  `scripts/embed-dock.js`); CI compiles the Linux binary and smoke-tests
+  `--help` and `--dock`.
+- Release workflow: least-privilege permissions, actions pinned by SHA,
+  scrcpy zip checked against a pinned SHA256, `npm ci` instead of a bun
+  lockfile that does not exist.
+- Ports validated (`--obs-port`, `--dock-port`, `OBS_PHONECAST_PORT`);
+  `OBS_PHONECAST_SCRCPY/ADB` paths are no longer reported as "bundled";
+  `adb` is searched next to the scrcpy found; `--launcher` implies control.
+
 ## Before publishing
 
-- [ ] packaging (`bun build --compile` or Node SEA)
+- [x] packaging: `bun build --compile` works, dock included (verified on a
+      Windows binary; a Linux CI job is configured but has not run yet; macOS never run)
 - [ ] code signing -- Gatekeeper blocks without a Developer ID, SmartScreen
       warns without reputation
 

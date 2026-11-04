@@ -154,7 +154,10 @@ Video
   --encoder <name>     force a specific encoder (see scrcpy --list-encoders).
                        First thing to try if the image has artifacts.
   --audio              also capture the phone's audio (Android 11+)
-  --control            allow mouse control
+  --control            allow mouse control. Implied by --app and by
+                       --launcher (launching an app, or driving the
+                       launcher, both go through the control channel);
+                       without either, scrcpy runs read-only.
 
 OBS
   --obs-port <n>       default 4455
