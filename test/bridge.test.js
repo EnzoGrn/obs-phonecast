@@ -319,6 +319,116 @@ test('a watchSession rejection resets the bridge to idle', async () => {
   assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'error' });
 });
 
+test('a watcher that gives up releases the session (OBS, screen timeout) before going idle', async () => {
+  const { broadcast, messages } = collector();
+  let stops = 0;
+  let statusWhenStopRan = null;
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({
+          mode: 'virtual',
+          stop: async () => {
+            stops += 1;
+            statusWhenStopRan = bridge.status();
+          },
+        }),
+        watchSession: async () => ({ reason: 'gave-up', exitCode: 1, restarts: 5 }),
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(stops, 1, 'session.stop() must run once, to release what the session holds');
+  // Still 'running' while releasing: a new start must not race the cleanup.
+  assert.equal(statusWhenStopRan, 'running');
+  assert.equal(bridge.status(), 'idle');
+  assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'gave-up' });
+});
+
+test('a watcher that throws also releases the session', async () => {
+  const { broadcast } = collector();
+  let stops = 0;
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({ mode: 'virtual', stop: async () => { stops += 1; } }),
+        watchSession: async () => {
+          throw new Error('watcher blew up');
+        },
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(stops, 1);
+  assert.equal(bridge.status(), 'idle');
+});
+
+test('a failing cleanup after gave-up still returns the bridge to idle', async () => {
+  const { broadcast, messages } = collector();
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({
+          mode: 'virtual',
+          stop: async () => {
+            throw new Error('adb gone');
+          },
+        }),
+        watchSession: async () => ({ reason: 'gave-up', exitCode: 1, restarts: 5 }),
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(bridge.status(), 'idle');
+  assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'gave-up' });
+});
+
+test('a normal stop() does not run the session cleanup a second time', async () => {
+  const { broadcast } = collector();
+  let stops = 0;
+  let resolveWatch;
+  const watchPromise = new Promise((r) => {
+    resolveWatch = r;
+  });
+  const bridge = createBridge({
+    broadcast,
+    deps: {
+      ...fakeOrchestratorDeps(),
+      loadOrchestrator: async () => ({
+        startSession: async () => ({
+          mode: 'virtual',
+          stop: async () => {
+            stops += 1;
+            resolveWatch({ reason: 'stopped', exitCode: 0, restarts: 0 });
+          },
+        }),
+        watchSession: async () => watchPromise,
+      }),
+    },
+  });
+
+  await bridge.start({});
+  await bridge.stop();
+
+  assert.equal(stops, 1);
+  assert.equal(bridge.status(), 'idle');
+});
+
 test('saveConfig rejects an invalid config and leaves the file alone', async () => {
   const { mkdtemp, rm, access } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

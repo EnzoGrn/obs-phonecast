@@ -94,7 +94,23 @@ export function createBridge({
       state = 'running';
       broadcast({ type: 'status', state, mode: session.mode });
 
-      const finish = (reason) => {
+      const finish = async (reason) => {
+        // The watcher can end on its own: it gave up after too many
+        // restarts, or it threw. Nobody called stop() in that case, so the
+        // session still holds the OBS connection, a screen-off timeout it
+        // may have extended, and its entry in the cleanup registry. The CLI
+        // gets this for free (index.js calls session.stop() once the
+        // watcher returns); the dock has to do it itself. stop() is
+        // idempotent. A 'stopped' end already went through stop().
+        if (reason !== 'stopped') {
+          try {
+            await started.stop();
+          } catch (err) {
+            logger.warn(`Cleanup after the session ended failed: ${err?.message ?? err}`);
+          }
+        }
+        // Only now go idle: until the cleanup is done, a new start would
+        // race the connection and timeout it is still releasing.
         session = null;
         watching = null;
         state = 'idle';
@@ -109,7 +125,7 @@ export function createBridge({
         (result) => finish(result.reason),
         (err) => {
           logger.error(`Session watcher failed: ${err?.message ?? err}`);
-          finish('error');
+          return finish('error');
         },
       );
     })();
