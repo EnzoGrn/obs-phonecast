@@ -188,6 +188,16 @@ async function waitForSourceSize(obs, { sceneName, sceneItemId, timeoutMs = 15_0
   });
 }
 
+/** The four crop fields of a scene item transform; 0 when no crop is wanted. */
+function cropTransform(crop) {
+  return {
+    cropTop: crop?.top ?? 0,
+    cropBottom: crop?.bottom ?? 0,
+    cropLeft: crop?.left ?? 0,
+    cropRight: crop?.right ?? 0,
+  };
+}
+
 /**
  * Places the source via BOUNDS rather than by computing a scale.
  *
@@ -232,7 +242,16 @@ export async function placeSource(
   await waitForSourceSize(obs, { sceneName, sceneItemId, timeoutMs: frameTimeoutMs });
 
   if (!reposition) {
-    return { sceneItemId, repositioned: false };
+    // Position and size stay the user's, but the crop is ours: it follows
+    // the requested mode (launcher or not), so it is always re-synced. A
+    // partial transform only touches the four crop fields; OBS leaves the
+    // rest of the item's transform alone.
+    await obs.call('SetSceneItemTransform', {
+      sceneName,
+      sceneItemId,
+      sceneItemTransform: cropTransform(crop),
+    });
+    return { sceneItemId, crop, repositioned: false };
   }
 
   const { baseWidth, baseHeight } = await obs.call('GetVideoSettings');
@@ -256,10 +275,7 @@ export async function placeSource(
       alignment: 5, // OBS_ALIGN_LEFT | OBS_ALIGN_TOP
       positionX,
       positionY: marginPx,
-      cropTop: crop?.top ?? 0,
-      cropBottom: crop?.bottom ?? 0,
-      cropLeft: crop?.left ?? 0,
-      cropRight: crop?.right ?? 0,
+      ...cropTransform(crop),
       rotation: 0,
     },
   });

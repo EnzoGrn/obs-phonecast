@@ -39,6 +39,15 @@ function fakeObs({ sourceWidth = 1080, sourceHeight = 2000 } = {}) {
   return obs;
 }
 
+/** Only crop keys may appear in a SetSceneItemTransform when not repositioning. */
+function assertNoGeometryTouched(obs) {
+  for (const c of obs.calls.filter((x) => x.request === 'SetSceneItemTransform')) {
+    for (const key of Object.keys(c.params.sceneItemTransform)) {
+      assert.match(key, /^crop(Top|Bottom|Left|Right)$/, `unexpected key ${key}`);
+    }
+  }
+}
+
 /* --- placeSource: the core fix --------------------------------------------- */
 
 test('reposition: true (default) computes and applies a transform', async () => {
@@ -49,7 +58,7 @@ test('reposition: true (default) computes and applies a transform', async () => 
   assert.ok(obs.calls.some((c) => c.request === 'SetSceneItemTransform'));
 });
 
-test('reposition: false never touches the transform, but still checks for a frame', async () => {
+test('reposition: false never touches position or size, but still checks for a frame', async () => {
   // This is the actual fix: a source that already existed (and may have
   // been manually framed by a streamer) must not get its position/size
   // silently overwritten on every relaunch.
@@ -61,7 +70,7 @@ test('reposition: false never touches the transform, but still checks for a fram
   });
 
   assert.equal(result.repositioned, false);
-  assert.ok(!obs.calls.some((c) => c.request === 'SetSceneItemTransform'));
+  assertNoGeometryTouched(obs);
   // The frame-arrival check must still run: it's what the caller uses to
   // decide whether to fall back to mirror mode, independent of framing.
   assert.ok(obs.calls.some((c) => c.request === 'GetSceneItemTransform'));
@@ -147,7 +156,7 @@ test('an already-existing scene and source keep their position untouched', async
   });
 
   assert.equal(result.repositioned, false);
-  assert.ok(!obs.calls.some((c) => c.request === 'SetSceneItemTransform'));
+  assertNoGeometryTouched(obs);
 });
 
 test('an existing scene with a brand-new source still gets positioned once', async () => {
@@ -162,4 +171,55 @@ test('an existing scene with a brand-new source still gets positioned once', asy
   });
 
   assert.equal(result.repositioned, true);
+});
+/* --- crop is synced even when the item is not repositioned ------------------ */
+
+test('reposition: false still applies the requested crop, and only the crop', async () => {
+  const obs = fakeObs();
+  await placeSource(obs, {
+    sceneName: 'Phone',
+    inputName: 'Phone Screen',
+    reposition: false,
+    crop: { top: 80, bottom: 120, left: 0, right: 0 },
+  });
+
+  const sets = obs.calls.filter((c) => c.request === 'SetSceneItemTransform');
+  assert.equal(sets.length, 1);
+  assert.deepEqual(sets[0].params.sceneItemTransform, {
+    cropTop: 80,
+    cropBottom: 120,
+    cropLeft: 0,
+    cropRight: 0,
+  });
+});
+
+test('reposition: false with crop null clears a stale crop', async () => {
+  const obs = fakeObs();
+  await placeSource(obs, {
+    sceneName: 'Phone',
+    inputName: 'Phone Screen',
+    reposition: false,
+    crop: null,
+  });
+
+  const set = obs.calls.find((c) => c.request === 'SetSceneItemTransform');
+  assert.deepEqual(set.params.sceneItemTransform, {
+    cropTop: 0,
+    cropBottom: 0,
+    cropLeft: 0,
+    cropRight: 0,
+  });
+});
+
+test('setupScene on existing scene + source forwards the launcher crop', async () => {
+  const obs = fakeObsForSetup({ sceneExists: true, inputExists: true });
+  await setupScene(obs, {
+    sceneName: 'Phone',
+    inputName: 'Phone Screen',
+    windowTitle: 'OBS-PHONECAST',
+    crop: { top: 10, bottom: 20, left: 0, right: 0 },
+  });
+  const set = obs.calls.find((c) => c.request === 'SetSceneItemTransform');
+  assert.equal(set.params.sceneItemTransform.cropTop, 10);
+  assert.equal(set.params.sceneItemTransform.cropBottom, 20);
 });
