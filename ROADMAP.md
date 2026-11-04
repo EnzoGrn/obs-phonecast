@@ -283,7 +283,14 @@ From a full audit of the repo; each item has a commit and a test.
 
 - Launcher crop now re-synced when scene + source already exist (a partial
   `SetSceneItemTransform` with only the crop fields; position and size stay
-  the user's).
+  the user's). Only a crop WE applied is ever updated or cleared: what was
+  last applied is remembered (`src/obs/crop-memory.js`, cache folder) and
+  compared with what OBS has now, so a crop set by hand in OBS is kept.
+  An explicit `--crop-top`/`--crop-bottom` (or `decorationCrop`) still wins.
+  With no record, an existing non-zero crop is kept (conservative).
+- Dock: when the watcher ends on its own (gave up after 5 restarts, or threw),
+  the session is now released (OBS connection, screen-off timeout, cleanup
+  registry) before going idle; before, only the CLI did that.
 - Dock: `starting` state, no double start, `stop` during startup, watcher
   failures reset to idle; `--dock-host` usable from another device.
 - Unknown CLI options and an unreadable config file are reported as user

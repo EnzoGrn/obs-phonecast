@@ -93,6 +93,8 @@ node src/index.js --app youtube      # start
 
 The "Phone" scene and "Phone Screen" source are created and positioned automatically. Ctrl+C to stop.
 
+Once the source exists, it's yours: obs-phonecast never moves or resizes it again, and a crop you set by hand in OBS is kept too. The only crop it manages is the one it applied itself in `--launcher` mode (to hide the status and navigation bars): it updates or clears that one on later runs, and leaves any other alone. To force a crop over yours, pass `--crop-top` / `--crop-bottom`. What it applied last is remembered in the cache folder (`obs-crop.json`); deleting that file is harmless.
+
 ### Prefer not to use a terminal at all?
 
 `obs-phonecast --dock` starts a web panel instead (app picker, on-air-style start/stop, live log feed, settings) that you add in OBS via Docks → Custom Browser Docks. It opens your default browser automatically so you immediately see it's working. See [Usage](#usage) below for the rest of what it can do.
@@ -249,6 +251,7 @@ obs-phonecast/
 │   ├── obs/
 │   │   ├── client.js       websocket connection
 │   │   ├── scene.js        the 7 steps of scene creation
+│   │   ├── crop-memory.js  remembers the crop we applied (ours vs set by hand)
 │   │   └── platform.js     inputKind and settings per OS
 │   │
 │   └── server/             the dock's backend (--dock)

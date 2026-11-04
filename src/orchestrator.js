@@ -32,6 +32,7 @@ import {
 import { findApp, looksLikePackage } from './scrcpy/app-list.js';
 import { listApps } from './scrcpy/apps.js';
 import { connectObs, disconnectObs } from './obs/client.js';
+import { createCropMemory } from './obs/crop-memory.js';
 import { setupScene, teardownScene, WindowNotFoundError, SceneError } from './obs/scene.js';
 import { isWayland } from './obs/platform.js';
 import { silentLogger } from './logger.js';
@@ -219,6 +220,13 @@ async function startSessionImpl(config, { logger, active, undo, runUndo, unregis
           attempt.mode === Mode.VIRTUAL && attempt.launcher
             ? resolveDecorationCrop(config.decorationCrop, { dpi: attempt.display.dpi })
             : null,
+        // A crop asked for by name (--crop-top/--crop-bottom, or
+        // "decorationCrop" in the config) beats one the streamer set by
+        // hand in OBS; the automatic crop never does.
+        forceCrop:
+          attempt.mode === Mode.VIRTUAL && attempt.launcher && config.decorationCrop != null,
+        // Tells our crop from the streamer's on a source that already exists.
+        cropMemory: createCropMemory(),
         // On the last attempt there's no fallback left: a source that's in
         // place but poorly framed beats no source at all.
         strictFrame: index < attempts.length - 1,
@@ -233,7 +241,10 @@ async function startSessionImpl(config, { logger, active, undo, runUndo, unregis
 
       logger.info(
         `Scene ready: "${scene.sceneName}" / "${scene.inputName}" (${scene.inputKind})` +
-          (scene.repositioned === false ? ' -- kept your existing position/size' : ''),
+          (scene.repositioned === false ? ' -- kept your existing position/size' : '') +
+          (scene.cropKept
+            ? ' -- kept the crop you set in OBS (use --crop-top/--crop-bottom to override)'
+            : ''),
       );
 
       return {
