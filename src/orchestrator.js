@@ -238,6 +238,9 @@ async function startSessionImpl(config, { logger, active, undo, runUndo, unregis
 
       return {
         mode: attempt.mode,
+        // Set by stop(): tells the watchdog the exit it sees is on purpose
+        // and that it must not relaunch scrcpy.
+        stopRequested: false,
         device: probe,
         scene,
         proc,
@@ -249,6 +252,7 @@ async function startSessionImpl(config, { logger, active, undo, runUndo, unregis
         // already dead.
         _active: active,
         async stop({ removeSource = false } = {}) {
+          this.stopRequested = true;
           if (removeSource) await teardownScene(obs, { inputName: scene.inputName });
           // this.proc, not proc: after a restart, the current process is
           // no longer the one captured when the session was created.
@@ -372,19 +376,31 @@ function isRecoverable(err) {
  *
  * @returns {Promise<{reason: string, exitCode: number|null, restarts: number}>}
  */
-export async function watchSession(session, { logger, maxRestarts = 5, delayMs = 2000 } = {}) {
+export async function watchSession(
+  session,
+  { logger, maxRestarts = 5, delayMs = 2000, deps = { launch, setupScene } } = {},
+) {
   let restarts = 0;
+  let exit = null;
+  // True after a relaunch attempt that failed: the dead process's exit was
+  // already consumed (and reported), so waiting on it again would return
+  // instantly and log the same crash twice.
+  let retryOnly = false;
+
+  const stopped = () => ({ reason: 'stopped', exitCode: exit?.exitCode ?? null, restarts });
 
   for (;;) {
-    const exit = await session.proc.waitForExit();
+    if (!retryOnly) {
+      exit = await session.proc.waitForExit();
 
-    if (exit.expected) return { reason: 'stopped', exitCode: exit.exitCode, restarts };
+      if (exit.expected || session.stopRequested) return stopped();
 
-    logger.warn(`scrcpy exited unexpectedly (code ${exit.exitCode}).`);
-    // The last stderr lines ALWAYS say why. They were only surfaced at
-    // debug level: at the moment of a crash, that's exactly what you need
-    // to read.
-    for (const line of session.proc.logs.slice(-10)) logger.warn(`  scrcpy | ${line}`);
+      logger.warn(`scrcpy exited unexpectedly (code ${exit.exitCode}).`);
+      // The last stderr lines ALWAYS say why. They were only surfaced at
+      // debug level: at the moment of a crash, that's exactly what you need
+      // to read.
+      for (const line of session.proc.logs.slice(-10)) logger.warn(`  scrcpy | ${line}`);
+    }
 
     if (restarts >= maxRestarts) {
       logger.error(`Giving up after ${maxRestarts} restarts.`);
@@ -395,9 +411,14 @@ export async function watchSession(session, { logger, maxRestarts = 5, delayMs =
     logger.warn(`Restarting ${restarts}/${maxRestarts} in ${delayMs} ms...`);
     await new Promise((r) => setTimeout(r, delayMs));
 
+    // stop() can land during the delay (or during the launch below): it has
+    // already torn the session down, so relaunching would resurrect a
+    // scrcpy nobody is watching.
+    if (session.stopRequested) return stopped();
+
     try {
       const { binaries, attempt, sceneOptions } = session._relaunch;
-      const proc = await launch({
+      const proc = await deps.launch({
         binaries,
         config: attempt,
         onLog: (line) => logger.debug(`scrcpy | ${line}`),
@@ -406,14 +427,24 @@ export async function watchSession(session, { logger, maxRestarts = 5, delayMs =
       session.proc = proc;
       session._active.proc = proc;
 
-      await setupScene(session.obs, {
+      if (session.stopRequested) {
+        await proc.stop();
+        return stopped();
+      }
+
+      await deps.setupScene(session.obs, {
         ...sceneOptions,
         strictFrame: false,
         isProcessAlive: () => proc.isAlive(),
       });
       logger.info('Session restored.');
+      retryOnly = false;
     } catch (err) {
       logger.warn(`Restart failed: ${err.message}`);
+      // If launch succeeded but setupScene failed, session.proc is the new,
+      // live process: wait on it normally. Only a failed launch leaves the
+      // old, already-reported exit behind.
+      retryOnly = !session.proc.isAlive();
     }
   }
 }

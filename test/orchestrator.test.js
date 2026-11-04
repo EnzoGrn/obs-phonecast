@@ -105,3 +105,124 @@ test('no scalar or object field of defaultConfig is lost by buildAttempts', () =
     );
   }
 });
+/* --- watchSession: stop / restart races ------------------------------------- */
+
+function recordingLogger() {
+  const warnings = [];
+  const noop = () => {};
+  return {
+    warnings,
+    debug: noop,
+    info: noop,
+    error: noop,
+    warn: (m) => warnings.push(m),
+  };
+}
+
+function deadProc(exit = { expected: false, exitCode: 1 }) {
+  let waits = 0;
+  return {
+    logs: [],
+    isAlive: () => false,
+    waitForExit: async () => {
+      waits += 1;
+      return exit;
+    },
+    waits: () => waits,
+  };
+}
+
+test('stop() during the restart delay prevents any relaunch', async () => {
+  const { watchSession } = await import('../src/orchestrator.js');
+  const session = {
+    proc: deadProc(),
+    stopRequested: false,
+    _relaunch: {},
+    _active: {},
+  };
+  let launched = 0;
+  const deps = {
+    launch: async () => void (launched += 1),
+    setupScene: async () => {},
+  };
+  const logger = recordingLogger();
+
+  const watching = watchSession(session, { logger, delayMs: 40, deps });
+  setTimeout(() => {
+    session.stopRequested = true;
+  }, 10);
+  const result = await watching;
+
+  assert.equal(launched, 0);
+  assert.equal(result.reason, 'stopped');
+});
+
+test('a failed relaunch does not re-read the consumed exit or log the crash twice', async () => {
+  const { watchSession } = await import('../src/orchestrator.js');
+  const old = deadProc();
+  const session = {
+    proc: old,
+    stopRequested: false,
+    _relaunch: { binaries: {}, attempt: {}, sceneOptions: {} },
+    _active: {},
+    obs: {},
+  };
+  let launches = 0;
+  const finalProc = {
+    logs: [],
+    isAlive: () => true,
+    waitForExit: async () => ({ expected: true, exitCode: 0 }),
+  };
+  const deps = {
+    launch: async () => {
+      launches += 1;
+      if (launches === 1) throw new Error('adb hiccup');
+      return finalProc;
+    },
+    setupScene: async () => {},
+  };
+  const logger = recordingLogger();
+
+  const result = await watchSession(session, { logger, delayMs: 1, deps });
+
+  assert.equal(launches, 2);
+  assert.equal(old.waits(), 1, 'the dead process exit must be awaited exactly once');
+  assert.equal(
+    logger.warnings.filter((m) => m.includes('exited unexpectedly')).length,
+    1,
+  );
+  assert.equal(result.reason, 'stopped');
+  assert.equal(result.restarts, 2);
+});
+
+test('stop() landing while the relaunch is in flight stops the new process', async () => {
+  const { watchSession } = await import('../src/orchestrator.js');
+  const session = {
+    proc: deadProc(),
+    stopRequested: false,
+    _relaunch: { binaries: {}, attempt: {}, sceneOptions: {} },
+    _active: {},
+    obs: {},
+  };
+  let stoppedNew = 0;
+  const newProc = {
+    logs: [],
+    isAlive: () => true,
+    stop: async () => void (stoppedNew += 1),
+    waitForExit: async () => ({ expected: true, exitCode: 0 }),
+  };
+  const deps = {
+    launch: async () => {
+      session.stopRequested = true; // stop() arrives mid-launch
+      return newProc;
+    },
+    setupScene: async () => {
+      throw new Error('must not run after a stop');
+    },
+  };
+
+  const result = await watchSession(session, { logger: recordingLogger(), delayMs: 1, deps });
+
+  assert.equal(stoppedNew, 1);
+  assert.equal(result.reason, 'stopped');
+});
