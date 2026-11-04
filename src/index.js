@@ -9,7 +9,7 @@
 import { parseArgs } from 'node:util';
 import { exec } from 'node:child_process';
 
-import { loadConfig, configPath } from './config.js';
+import { loadConfig, configPath, wrapParseArgsError } from './config.js';
 import { Mode } from './scrcpy/args.js';
 import { createLogger } from './logger.js';
 import { isExpectedError, formatError } from './errors.js';
@@ -338,7 +338,12 @@ function openInBrowser(url, logger) {
 }
 
 async function main() {
-  const { values } = parseArgs({ options, allowPositionals: false });
+  let values;
+  try {
+    ({ values } = parseArgs({ options, allowPositionals: false }));
+  } catch (err) {
+    throw wrapParseArgsError(err);
+  }
 
   if (values.help) {
     process.stdout.write(HELP);

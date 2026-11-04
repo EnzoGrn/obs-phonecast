@@ -6,7 +6,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { defaultConfig, Mode } from './scrcpy/args.js';
+import { defaultConfig, Mode, ConfigError } from './scrcpy/args.js';
+import { ErrorCode } from './errors.js';
 import { configDir } from './paths.js';
 
 export const CONFIG_FILENAME = 'obs-phonecast.json';
@@ -81,8 +82,28 @@ async function readJsonIfExists(file) {
     return JSON.parse(await readFile(file, 'utf8'));
   } catch (err) {
     if (err.code === 'ENOENT') return {};
-    throw new Error(`Config unreadable (${file}): ${err.message}`);
+    // A broken file is the user's to fix, not an obs-phonecast bug: raise a
+    // user-facing error that names the file, instead of a bare Error that
+    // the CLI would report as a bug with a stack trace.
+    throw new ConfigError(`Config file could not be read: ${err.message}`, {
+      code: ErrorCode.CONFIG_UNREADABLE,
+      hint: `Fix or delete this file, then try again: ${file}`,
+    });
   }
+}
+
+/**
+ * Turns a node:util parseArgs failure (unknown option, missing value...)
+ * into a user-facing ConfigError. Anything else is returned untouched, so a
+ * genuine bug is still reported as one.
+ */
+export function wrapParseArgsError(err) {
+  if (typeof err?.code === 'string' && err.code.startsWith('ERR_PARSE_ARGS_')) {
+    return new ConfigError(err.message, {
+      hint: 'Run obs-phonecast --help to see the available options.',
+    });
+  }
+  return err;
 }
 
 /**
