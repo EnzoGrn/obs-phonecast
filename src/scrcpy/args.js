@@ -321,7 +321,12 @@ export function buildArgs(config) {
   // control channel. So the two can't be combined. Control is enabled
   // implicitly rather than failing: with no app, we keep --no-control, which
   // avoids accidental clicks.
-  if (!config.control.enabled && !config.app) args.push('--no-control');
+  //
+  // --launcher counts as well: its whole point is to drive the phone's home
+  // screen from the PC, which is impossible with --no-control. So both
+  // --app and --launcher enable control implicitly (documented in --help
+  // and the README); only a plain mirror/virtual session stays read-only.
+  if (!config.control.enabled && !config.app && !config.launcher) args.push('--no-control');
   args.push('--disable-screensaver');
   if (config.turnScreenOff) args.push('--turn-screen-off');
   if (config.stayAwake) args.push('--stay-awake');

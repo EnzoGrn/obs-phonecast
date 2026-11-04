@@ -186,9 +186,16 @@ test('with an app, --no-control is not sent', () => {
   assert.ok(!args.includes('--no-control'));
 });
 
-test('with no app, --no-control is kept', () => {
-  const args = buildArgs(cfg({ launcher: true, app: null }));
+test('plain mirror (no app, no launcher), --no-control is kept', () => {
+  // Virtual mode refuses to start without an app or a launcher, so the
+  // read-only case only exists in mirror mode.
+  const args = buildArgs(cfg({ mode: Mode.MIRROR, launcher: false, app: null }));
   assert.ok(args.includes('--no-control'));
+});
+
+test('--launcher without --app keeps control on: the launcher would be unusable otherwise', () => {
+  const args = buildArgs(cfg({ launcher: true, app: null }));
+  assert.ok(!args.includes('--no-control'));
 });
 
 test('control explicitly enabled: no --no-control either', () => {
