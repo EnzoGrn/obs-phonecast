@@ -43,25 +43,24 @@ export class BinaryError extends PhonecastError {}
 
 /**
  * Search order, from most explicit to most implicit:
- *   1. environment variable (escape hatch for advanced users)
+ *   1. environment variable (escape hatch for advanced users): a full path,
+ *      or a bare command name such as "scrcpy" that is looked up in PATH
  *   2. binaries bundled in vendor/ (Windows only in practice)
- *   3. PATH
+ *   3. the folder of the scrcpy we already found (adb only): the one that
+ *      ships with scrcpy is the one guaranteed compatible with it
+ *   4. PATH
+ *
+ * `bundled` is true ONLY for the vendor/ copy. A path the user chose through
+ * the environment is not "bundled", whatever folder it lives in.
  *
  * License reminder: scrcpy is Apache 2.0, redistributing the binaries is
  * allowed. If you populate vendor/, keep the original LICENSE file and
  * credit Genymobile / Romain Vimont in your README.
  */
-function candidates(name, envVar) {
-  const list = [];
-  if (process.env[envVar]) list.push(process.env[envVar]);
-  list.push(path.join(appRoot(), 'vendor', 'scrcpy', process.platform, `${name}${EXE}`));
-  return list;
-}
-
 async function inPath(name) {
   const finder = process.platform === 'win32' ? 'where' : 'which';
   try {
-    const { stdout } = await execa(finder, [`${name}${EXE}`], { reject: true });
+    const { stdout } = await execa(finder, [name], { reject: true });
     const first = stdout.split(/\r?\n/).find((l) => l.trim());
     return first ? first.trim() : null;
   } catch {
@@ -69,11 +68,41 @@ async function inPath(name) {
   }
 }
 
-async function resolveOne(name, envVar) {
-  for (const candidate of candidates(name, envVar)) {
-    if (existsSync(candidate)) return { path: candidate, bundled: true };
+/** A value with no directory part ("scrcpy", "adb.exe") is a command name. */
+function isBareCommand(value) {
+  return !value.includes('/') && !value.includes('\\');
+}
+
+export async function resolveOne(
+  name,
+  envVar,
+  {
+    alongside = null,
+    env = process.env,
+    root = appRoot(),
+    exists = existsSync,
+    which = inPath,
+  } = {},
+) {
+  const fromEnv = env[envVar];
+  if (fromEnv) {
+    if (isBareCommand(fromEnv)) {
+      const found = await which(fromEnv);
+      if (found) return { path: found, bundled: false };
+    } else if (exists(fromEnv)) {
+      return { path: fromEnv, bundled: false };
+    }
   }
-  const found = await inPath(name);
+
+  const vendored = path.join(root, 'vendor', 'scrcpy', process.platform, `${name}${EXE}`);
+  if (exists(vendored)) return { path: vendored, bundled: true };
+
+  if (alongside) {
+    const sibling = path.join(path.dirname(alongside), `${name}${EXE}`);
+    if (exists(sibling)) return { path: sibling, bundled: false };
+  }
+
+  const found = await which(`${name}${EXE}`);
   if (found) return { path: found, bundled: false };
   return null;
 }
@@ -115,7 +144,7 @@ export async function resolveBinaries({ checkVersion = true } = {}) {
 
   // adb: the one shipped alongside scrcpy is guaranteed compatible. We
   // prefer it, and pass it to scrcpy via the ADB variable it reads natively.
-  const adb = await resolveOne('adb', 'OBS_PHONECAST_ADB');
+  const adb = await resolveOne('adb', 'OBS_PHONECAST_ADB', { alongside: scrcpy.path });
   if (!adb) {
     throw new BinaryError('adb not found.', {
       code: ErrorCode.BINARY_NOT_FOUND,
