@@ -12,7 +12,7 @@
  *     { type: 'saveConfig', config }       write the config file
  *
  *   server -> dock
- *     { type: 'status', state: 'idle'|'running', mode?, reason? }
+ *     { type: 'status', state: 'idle'|'starting'|'running', mode?, reason? }
  *     { type: 'apps', apps }
  *     { type: 'config', config }           reply to getConfig
  *     { type: 'configSaved' }              reply to saveConfig
@@ -147,7 +147,7 @@ export async function startDockServer({ port = 7412, host = '127.0.0.1', logger 
 
       try {
         if (message.type === 'start') {
-          await bridge.start({ app: message.app, launcher: message.launcher });
+          await bridge.start({ app: message.app, launcher: message.launcher, audio: message.audio });
         } else if (message.type === 'stop') {
           await bridge.stop();
         } else if (message.type === 'listApps') {

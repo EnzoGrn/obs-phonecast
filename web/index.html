@@ -379,16 +379,23 @@
   function onStatus(message) {
     sessionState = message.state;
     const running = sessionState === 'running';
+    const starting = sessionState === 'starting';
+    const busy = running || starting;
 
-    appSelect.disabled = running;
-    launcherCheck.disabled = running;
-    audioCheck.disabled = running;
+    appSelect.disabled = busy;
+    launcherCheck.disabled = busy;
+    audioCheck.disabled = busy;
     logs.classList.toggle('live', running);
 
     onAirBtn.classList.toggle('live', running);
-    onAirBtn.textContent = running ? `Stop (${message.mode})` : 'Start';
+    // While starting the button stays inert: a second click would only be
+    // rejected by the bridge. Cancelling mid-start is possible over the
+    // protocol (type: 'stop') but is not offered in the UI.
+    onAirBtn.disabled = starting;
+    onAirBtn.textContent = running ? `Stop (${message.mode})` : starting ? 'Starting...' : 'Start';
 
-    if (running) setStatus('running', 'on air');
+    if (starting) setStatus('', 'starting');
+    else if (running) setStatus('running', 'on air');
     else setStatus('connected', message.reason ? `stopped (${message.reason})` : 'idle');
   }
 

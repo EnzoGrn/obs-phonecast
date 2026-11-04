@@ -44,6 +44,9 @@ const defaultDeps = {
 export function createBridge({ broadcast, deps = defaultDeps, configFile = null } = {}) {
   let session = null;
   let watching = null; // the in-flight watchSession() promise, if any
+  let state = 'idle'; // 'idle' | 'starting' | 'running'
+  let starting = null; // the in-flight start, so stop() can wait for it
+  let cancelRequested = false;
 
   // Kept so a dock that connects AFTER the session already started still
   // sees everything that happened so far -- this is exactly what
@@ -56,37 +59,90 @@ export function createBridge({ broadcast, deps = defaultDeps, configFile = null 
   });
 
   function status() {
-    return session ? 'running' : 'idle';
+    return state;
   }
 
-  async function start({ app = null, launcher = false, audio = false } = {}) {
-    if (session) {
+  function startSessionNow(options) {
+    const { app = null, launcher = false, audio = false } = options;
+    return (async () => {
+      const overrides = {};
+      if (app) overrides.app = app;
+      if (launcher) overrides.launcher = true;
+      if (audio) overrides.audio = { enabled: true };
+      const config = await loadConfig(overrides);
+
+      const { startSession, watchSession } = await deps.loadOrchestrator();
+
+      const started = await startSession(config, { logger });
+
+      // A stop() that arrived while we were still starting: the session
+      // exists now, so shut it straight down rather than going live.
+      if (cancelRequested) {
+        await started.stop();
+        state = 'idle';
+        broadcast({ type: 'status', state, reason: 'stopped' });
+        return;
+      }
+
+      session = started;
+      state = 'running';
+      broadcast({ type: 'status', state, mode: session.mode });
+
+      const finish = (reason) => {
+        session = null;
+        watching = null;
+        state = 'idle';
+        broadcast({ type: 'status', state, reason });
+      };
+
+      // Not awaited here on purpose: watchSession blocks until the session
+      // ends, and start() must return as soon as the session is UP, not
+      // once it's over. Its eventual resolution is what flips the state
+      // back to idle and tells connected docks the run has ended.
+      watching = watchSession(started, { logger }).then(
+        (result) => finish(result.reason),
+        (err) => {
+          logger.error(`Session watcher failed: ${err?.message ?? err}`);
+          finish('error');
+        },
+      );
+    })();
+  }
+
+  async function start(options = {}) {
+    // Checked and set synchronously, before the first await: two docks (or
+    // a double click) racing here must not both get through.
+    if (state !== 'idle') {
       throw new Error('A session is already running. Stop it before starting another.');
     }
+    state = 'starting';
+    cancelRequested = false;
+    broadcast({ type: 'status', state });
 
-    const overrides = {};
-    if (app) overrides.app = app;
-    if (launcher) overrides.launcher = true;
-    if (audio) overrides.audio = { enabled: true };
-    const config = await loadConfig(overrides);
-
-    const { startSession, watchSession } = await deps.loadOrchestrator();
-
-    session = await startSession(config, { logger });
-    broadcast({ type: 'status', state: status(), mode: session.mode });
-
-    // Not awaited here on purpose: watchSession blocks until the session
-    // ends, and start() must return as soon as the session is UP, not
-    // once it's over. Its eventual resolution is what flips `session`
-    // back to null and tells connected docks the run has ended.
-    watching = watchSession(session, { logger }).then((result) => {
-      session = null;
-      watching = null;
-      broadcast({ type: 'status', state: status(), reason: result.reason });
-    });
+    starting = startSessionNow(options);
+    try {
+      await starting;
+    } catch (err) {
+      state = 'idle';
+      broadcast({ type: 'status', state });
+      throw err;
+    } finally {
+      starting = null;
+    }
   }
 
   async function stop() {
+    if (state === 'starting') {
+      cancelRequested = true;
+      // start() unwinds on its own (and broadcasts idle); wait for it so the
+      // caller sees a settled bridge.
+      try {
+        await starting;
+      } catch {
+        /* the failed start already reported its own error */
+      }
+      return;
+    }
     if (!session) return;
     await session.stop();
     // watchSession's own loop observes the expected exit and resolves on

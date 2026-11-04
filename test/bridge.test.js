@@ -55,8 +55,11 @@ test('start flips status to running and broadcasts it', async () => {
 
   assert.equal(bridge.status(), 'running');
   assert.deepEqual(
-    messages.find((m) => m.type === 'status'),
-    { type: 'status', state: 'running', mode: 'virtual' },
+    messages.filter((m) => m.type === 'status'),
+    [
+      { type: 'status', state: 'starting' },
+      { type: 'status', state: 'running', mode: 'virtual' },
+    ],
   );
 });
 
@@ -87,8 +90,8 @@ test('stop flips status back to idle and broadcasts the reason', async () => {
 
   assert.equal(bridge.status(), 'idle');
   const statusMessages = messages.filter((m) => m.type === 'status');
-  assert.equal(statusMessages.length, 2); // running, then idle
-  assert.deepEqual(statusMessages[1], { type: 'status', state: 'idle', reason: 'stopped' });
+  assert.equal(statusMessages.length, 3); // starting, running, then idle
+  assert.deepEqual(statusMessages[2], { type: 'status', state: 'idle', reason: 'stopped' });
 });
 
 test('a new dock client gets replayed the log history', async () => {
@@ -212,4 +215,106 @@ test('saveConfig writes to the same path getConfig reads from', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+/* --- starting state: concurrency and cancellation --------------------------- */
+
+/** startSession that stays pending until release() is called. */
+function slowStart() {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const calls = [];
+  let stopped = 0;
+  let resolveWatch;
+  const watchPromise = new Promise((r) => {
+    resolveWatch = r;
+  });
+  const session = {
+    mode: 'virtual',
+    stop: async () => {
+      stopped += 1;
+      resolveWatch({ reason: 'stopped' });
+    },
+  };
+  const deps = {
+    ...fakeOrchestratorDeps(),
+    loadOrchestrator: async () => ({
+      startSession: async () => {
+        calls.push(1);
+        await gate;
+        return session;
+      },
+      watchSession: async () => watchPromise,
+    }),
+  };
+  return { deps, release, calls, stoppedCount: () => stopped };
+}
+
+test('two concurrent start() calls launch exactly one session', async () => {
+  const { broadcast } = collector();
+  const slow = slowStart();
+  const bridge = createBridge({ broadcast, deps: slow.deps });
+
+  const first = bridge.start({});
+  assert.equal(bridge.status(), 'starting');
+  await assert.rejects(() => bridge.start({}), /already running/);
+
+  slow.release();
+  await first;
+
+  assert.equal(slow.calls.length, 1);
+  assert.equal(bridge.status(), 'running');
+});
+
+test('stop() during startup stops the session as soon as it is up', async () => {
+  const { broadcast, messages } = collector();
+  const slow = slowStart();
+  const bridge = createBridge({ broadcast, deps: slow.deps });
+
+  const starting = bridge.start({});
+  const stopping = bridge.stop();
+  slow.release();
+  await Promise.all([starting, stopping]);
+
+  assert.equal(slow.stoppedCount(), 1);
+  assert.equal(bridge.status(), 'idle');
+  const states = messages.filter((m) => m.type === 'status').map((m) => m.state);
+  assert.deepEqual(states, ['starting', 'idle']);
+});
+
+test('a failed startSession returns the bridge to idle and can be retried', async () => {
+  const { broadcast, messages } = collector();
+  const deps = fakeOrchestratorDeps({
+    startSessionImpl: async () => {
+      throw new Error('no device');
+    },
+  });
+  const bridge = createBridge({ broadcast, deps });
+
+  await assert.rejects(() => bridge.start({}), /no device/);
+
+  assert.equal(bridge.status(), 'idle');
+  assert.equal(messages.at(-1).state, 'idle');
+});
+
+test('a watchSession rejection resets the bridge to idle', async () => {
+  const { broadcast, messages } = collector();
+  const deps = {
+    ...fakeOrchestratorDeps(),
+    loadOrchestrator: async () => ({
+      startSession: async () => ({ mode: 'virtual', stop: async () => {} }),
+      watchSession: async () => {
+        throw new Error('watcher blew up');
+      },
+    }),
+  };
+  const bridge = createBridge({ broadcast, deps });
+
+  await bridge.start({});
+  // Let the rejection handler run.
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(bridge.status(), 'idle');
+  assert.deepEqual(messages.at(-1), { type: 'status', state: 'idle', reason: 'error' });
 });
