@@ -96,6 +96,17 @@ const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
 
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::']);
 
+/**
+ * The URL to show (and open) for a server bound to `host`. A wildcard bind
+ * is reachable locally through localhost, which is what the person at this
+ * machine wants; an IPv6 literal needs brackets in a URL.
+ */
+export function dockUrl(host, port) {
+  const bare = String(host).replace(/^\[|\]$/g, '');
+  if (WILDCARD_HOSTS.has(bare)) return `http://localhost:${port}`;
+  return `http://${bare.includes(':') ? `[${bare}]` : bare}:${port}`;
+}
+
 /** Lowercase hostname without IPv6 brackets, in URL's canonical spelling. */
 function normalizeHostname(hostname) {
   const bare = String(hostname).replace(/^\[|\]$/g, '').toLowerCase();
@@ -174,9 +185,16 @@ export function isAllowedOrigin(origin, port, { host = null, hostHeader = null }
  * @param {string} options.host  defaults to loopback-only; see the
  *   security note above before changing this
  * @param {object} options.logger
+ * @param {string} options.logLevel  threshold for the session log shown in
+ *   the dock (error|warn|info|debug), so -v / -q apply there too
  * @returns {Promise<{url: string, close: () => Promise<void>}>}
  */
-export async function startDockServer({ port = 7412, host = '127.0.0.1', logger } = {}) {
+export async function startDockServer({
+  port = 7412,
+  host = '127.0.0.1',
+  logger,
+  logLevel = 'info',
+} = {}) {
   const dockHtml = await loadDockHtml();
 
   if (!LOOPBACK_HOSTNAMES.has(host)) {
@@ -208,7 +226,7 @@ export async function startDockServer({ port = 7412, host = '127.0.0.1', logger 
     }
   }
 
-  const bridge = createBridge({ broadcast });
+  const bridge = createBridge({ broadcast, logLevel });
 
   wss.on('connection', (ws) => {
     clients.add(ws);
@@ -261,9 +279,9 @@ export async function startDockServer({ port = 7412, host = '127.0.0.1', logger 
   return new Promise((resolve, reject) => {
     httpServer.once('error', reject);
     httpServer.listen(port, host, () => {
-      logger?.info(`Dock server listening at http://${host}:${port}`);
+      logger?.info(`Dock server listening at ${dockUrl(host, port)}`);
       resolve({
-        url: `http://${host === '::1' ? 'localhost' : host}:${port}`,
+        url: dockUrl(host, port),
         close: () =>
           new Promise((r) => {
             wss.close();

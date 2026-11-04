@@ -9,7 +9,7 @@
 import { parseArgs } from 'node:util';
 import { exec } from 'node:child_process';
 
-import { loadConfig, configPath, wrapParseArgsError } from './config.js';
+import { loadConfig, configPath, wrapParseArgsError, parsePort } from './config.js';
 import { Mode } from './scrcpy/args.js';
 import { createLogger } from './logger.js';
 import { installFatalHandlers } from './fatal.js';
@@ -238,7 +238,7 @@ function buildOverrides(values) {
 
   const obs = {};
   if (values['obs-password']) obs.password = values['obs-password'];
-  if (values['obs-port']) obs.port = Number(values['obs-port']);
+  if (values['obs-port']) obs.port = parsePort(values['obs-port'], '--obs-port');
   if (values.scene) obs.sceneName = values.scene;
   if (values.switch) obs.switchToScene = true;
   if (Object.keys(obs).length) o.obs = obs;
@@ -250,9 +250,12 @@ function buildOverrides(values) {
  * A single logger for the whole process. The level comes from the flags,
  * and the sink stays stderr until the dock exists.
  */
+function logLevelFor(values) {
+  return values.quiet ? 'error' : values.verbose ? 'debug' : 'info';
+}
+
 function makeLogger(values) {
-  const level = values.quiet ? 'error' : values.verbose ? 'debug' : 'info';
-  return createLogger({ level });
+  return createLogger({ level: logLevelFor(values) });
 }
 
 /**
@@ -343,9 +346,14 @@ async function main() {
 
   if (values.dock) {
     const { startDockServer } = await import('./server/index.js');
-    const port = values['dock-port'] ? Number(values['dock-port']) : undefined;
+    const port = values['dock-port'] ? parsePort(values['dock-port'], '--dock-port') : undefined;
     const host = values['dock-host'] || undefined;
-    const { url, close } = await startDockServer({ port, host, logger });
+    const { url, close } = await startDockServer({
+      port,
+      host,
+      logger,
+      logLevel: logLevelFor(values),
+    });
 
     logger.info('');
     logger.info(`Dock ready at ${url}`);

@@ -118,3 +118,14 @@ test('loadDockHtml explains itself when there is no page at all', async () => {
     /embed-dock/,
   );
 });
+
+/* --- displayed URL ----------------------------------------------------------- */
+
+test('dockUrl shows a usable URL for loopback, wildcard and IPv6 hosts', async () => {
+  const { dockUrl } = await import('../src/server/index.js');
+  assert.equal(dockUrl('127.0.0.1', 7412), 'http://127.0.0.1:7412');
+  assert.equal(dockUrl('0.0.0.0', 7412), 'http://localhost:7412');
+  assert.equal(dockUrl('::', 7412), 'http://localhost:7412');
+  assert.equal(dockUrl('::1', 7412), 'http://[::1]:7412');
+  assert.equal(dockUrl('192.168.1.20', 7412), 'http://192.168.1.20:7412');
+});

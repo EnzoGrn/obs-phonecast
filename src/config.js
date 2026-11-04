@@ -1,6 +1,6 @@
 /**
  * Configuration loading.
- * Priority: CLI arguments > user file > defaults.
+ * Priority: CLI arguments > environment > user file > defaults.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -107,6 +107,22 @@ export function wrapParseArgsError(err) {
 }
 
 /**
+ * A TCP port from user input (--obs-port, OBS_PHONECAST_PORT...). Number()
+ * alone turns "abc" into NaN and "44 55" into NaN, which then reached
+ * obs-websocket as ws://localhost:NaN; fail early with a clear message.
+ */
+export function parsePort(value, label) {
+  const text = String(value).trim();
+  const port = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new ConfigError(`Invalid ${label}: "${value}" (expected a port from 1 to 65535).`, {
+      hint: 'Example: 4455',
+    });
+  }
+  return port;
+}
+
+/**
  * Settings from the environment.
  *
  * This is the right place for a secret: unlike a CLI argument, it shows up
@@ -115,7 +131,7 @@ export function wrapParseArgsError(err) {
 function fromEnv() {
   const obs = {};
   if (process.env.OBS_PHONECAST_PASSWORD) obs.password = process.env.OBS_PHONECAST_PASSWORD;
-  if (process.env.OBS_PHONECAST_PORT) obs.port = Number(process.env.OBS_PHONECAST_PORT);
+  if (process.env.OBS_PHONECAST_PORT) obs.port = parsePort(process.env.OBS_PHONECAST_PORT, 'OBS_PHONECAST_PORT');
   if (process.env.OBS_PHONECAST_HOST) obs.host = process.env.OBS_PHONECAST_HOST;
   return Object.keys(obs).length ? { obs } : {};
 }

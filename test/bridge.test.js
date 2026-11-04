@@ -335,3 +335,14 @@ test('saveConfig rejects an invalid config and leaves the file alone', async () 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('the bridge logger honors the configured level (-q hides info)', () => {
+  const { broadcast, messages } = collector();
+  const bridge = createBridge({ broadcast, deps: fakeOrchestratorDeps(), logLevel: 'error' });
+
+  bridge.logger.info('chatty');
+  bridge.logger.error('important');
+
+  const logs = messages.filter((m) => m.type === 'log').map((m) => m.record.message);
+  assert.deepEqual(logs, ['important']);
+});

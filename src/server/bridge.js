@@ -38,10 +38,16 @@ const defaultDeps = {
  *   JSON-serializable message to every connected dock client
  * @param {object} options.deps  override for the lazy module loaders above
  *   (tests only)
+ * @param {string} options.logLevel  logger threshold (-v / -q from the CLI)
  * @param {string|null} options.configFile  override for the config file
  *   path (tests only); defaults to the real configPath()
  */
-export function createBridge({ broadcast, deps = defaultDeps, configFile = null } = {}) {
+export function createBridge({
+  broadcast,
+  deps = defaultDeps,
+  configFile = null,
+  logLevel = 'info',
+} = {}) {
   let session = null;
   let watching = null; // the in-flight watchSession() promise, if any
   let state = 'idle'; // 'idle' | 'starting' | 'running'
@@ -54,7 +60,7 @@ export function createBridge({ broadcast, deps = defaultDeps, configFile = null 
   const history = createBufferSink({ max: 300 });
 
   const logger = createLogger({
-    level: 'info',
+    level: logLevel,
     sink: combineSinks(history, (record) => broadcast({ type: 'log', record })),
   });
 

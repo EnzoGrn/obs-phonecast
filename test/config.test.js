@@ -61,3 +61,37 @@ test('errors that are not parseArgs failures stay bugs', () => {
   assert.equal(wrapParseArgsError(bug), bug);
   assert.equal(isExpectedError(wrapParseArgsError(bug)), false);
 });
+
+/* --- ports ------------------------------------------------------------------- */
+
+import { parsePort } from '../src/config.js';
+
+test('parsePort accepts integers 1-65535', () => {
+  assert.equal(parsePort('4455', '--obs-port'), 4455);
+  assert.equal(parsePort('1', '--obs-port'), 1);
+  assert.equal(parsePort(' 65535 ', '--obs-port'), 65535);
+});
+
+test('parsePort rejects junk with an expected error naming the option', () => {
+  for (const bad of ['abc', '', '0', '65536', '-1', '44.5', '44 55', '1e3']) {
+    assert.throws(
+      () => parsePort(bad, '--obs-port'),
+      (err) => isExpectedError(err) && /--obs-port/.test(err.message),
+      bad,
+    );
+  }
+});
+
+test('OBS_PHONECAST_PORT is validated when loading the config', async () => {
+  const saved = process.env.OBS_PHONECAST_PORT;
+  process.env.OBS_PHONECAST_PORT = 'not-a-port';
+  try {
+    await assert.rejects(
+      () => loadConfig({}, { file: path.join(tmpdir(), 'phonecast-none.json') }),
+      /OBS_PHONECAST_PORT/,
+    );
+  } finally {
+    if (saved === undefined) delete process.env.OBS_PHONECAST_PORT;
+    else process.env.OBS_PHONECAST_PORT = saved;
+  }
+});
