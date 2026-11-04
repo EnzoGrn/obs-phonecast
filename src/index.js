@@ -12,33 +12,16 @@ import { exec } from 'node:child_process';
 import { loadConfig, configPath, wrapParseArgsError } from './config.js';
 import { Mode } from './scrcpy/args.js';
 import { createLogger } from './logger.js';
+import { installFatalHandlers } from './fatal.js';
 import { isExpectedError, formatError } from './errors.js';
 
 // The orchestrator is imported dynamically inside main(): it pulls in
 // execa and obs-websocket-js, and --help must work BEFORE any npm install.
 // That's the first command anyone discovering the tool will run.
 
-/**
- * General safety net against silent process crashes.
- *
- * A real bug we hit: an OBS connection with no dedicated error handler
- * (fixed in obs/client.js) crashed Node on a simple network blip, and the
- * scrcpy cleanup on `process.on('exit')` then killed the stream, believing
- * it was cleaning up after a normal exit -- with not a single error line
- * on the scrcpy side to explain it. This net covers the same root cause
- * coming from elsewhere (another dependency, an unlistened event): a loud
- * warning beats a silent disconnect mid-stream.
- */
-process.on('uncaughtException', (err) => {
-  process.stderr.write(
-    `\nUnhandled exception (stream continues if possible): ${err?.stack ?? err}\n`,
-  );
-});
-process.on('unhandledRejection', (reason) => {
-  process.stderr.write(
-    `\nUnhandled promise rejection (stream continues if possible): ${reason}\n`,
-  );
-});
+// Uncaught errors restore state (screen timeout, OBS) and exit non-zero; see
+// fatal.js for why this no longer carries on, and the one benign exception.
+installFatalHandlers();
 
 const options = {
   app: { type: 'string' },
